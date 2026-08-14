@@ -9,7 +9,22 @@ import {
   getQoderModelListURL,
   isQoderCNMode,
 } from "./cosy.js";
-import { type QoderModelDef, type QoderModelEntry, staticCnModels, staticModels, ZERO_COST } from "./models-static.js";
+import { type QoderModelDef, staticCnModels, staticModels, ZERO_COST } from "./models-static.js";
+
+/** Shape of a single entry returned by the Qoder /model/list endpoint. */
+interface QoderModelEntry {
+  key?: string;
+  enable?: boolean;
+  display_name?: string;
+  max_input_tokens?: number;
+  max_output_tokens?: number;
+  context_config?: Record<string, { token_count?: number; is_default?: boolean }>;
+  is_vl?: boolean;
+  is_reasoning?: boolean;
+  thinking_config?: { enabled?: { efforts?: unknown } };
+  source?: string;
+  [key: string]: unknown;
+}
 
 function getQoderCachePath(mode?: string): string {
   return join(
