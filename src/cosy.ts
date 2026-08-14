@@ -71,10 +71,6 @@ export function isQoderCNMode(modeOverride?: string): boolean {
   return getQoderMode(modeOverride) === "cn";
 }
 
-export function getQoderCNPat(): string {
-  return process.env.QODERCN_PERSONAL_ACCESS_TOKEN || process.env.QODERCN_PAT || "";
-}
-
 export function getQoderBaseUrl(mode?: string): string {
   return isQoderCNMode(mode) ? "https://gateway.qoder.com.cn/" : "https://api3.qoder.sh/";
 }
