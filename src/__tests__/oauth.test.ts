@@ -27,8 +27,6 @@ vi.mock("../models.js", () => ({
   updateQoderModelsCache: vi.fn().mockResolvedValue(undefined),
   getCachedModels: vi.fn().mockReturnValue([]),
   isCacheStale: vi.fn().mockReturnValue(true),
-  staticModels: [],
-  staticCnModels: [],
 }));
 
 describe("oauth autoLoginQoderFromEnvironment", () => {

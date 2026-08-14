@@ -7,7 +7,8 @@ import {
   isQoderCNMode,
   toQoderCNFriendlyModel,
 } from "./cosy.js";
-import { getCachedModels, isCacheStale, staticCnModels, staticModels, updateQoderModelsCache } from "./models.js";
+import { getCachedModels, isCacheStale, updateQoderModelsCache } from "./models.js";
+import { staticCnModels, staticModels } from "./models-static.js";
 import {
   autoLoginQoderFromEnvironment,
   getCachedCredentials,
