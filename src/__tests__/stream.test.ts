@@ -501,6 +501,7 @@ describe("streamQoder", () => {
     expect(msg?.stopReason).toBe("stop");
     const text = msg?.content.find((c) => c.type === "text");
     expect(text && "text" in text ? text.text : "").toBe("before");
+    expect(events.some((e) => "delta" in e && String(e.delta).includes("AFTER-DONE"))).toBe(false);
   });
 
   it("waits as long as Retry-After says on 429, not its own backoff", async () => {
