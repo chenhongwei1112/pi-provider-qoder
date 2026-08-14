@@ -67,11 +67,12 @@
 | `sse.ts` | SSE 行切分(纯函数) | 新增 ~40 |
 | `models-static.ts` | 静态模型表、`QoderModelDef`、`QoderModelEntry`、`ZERO_COST` | 新增 ~385 |
 | `models.ts` | 缓存读写、目录抓取、friendly 查询 | 562 → ~180 |
-| `oauth.ts` | 凭证编排 + 新增 `resolveQoderIdentity` | 227 → ~250 |
-| `cosy.ts` | 不动 | 310 |
+| `oauth.ts` | 凭证编排 + 新增 `identityFromCredentials`、`resolveQoderIdentity` | 227 → ~270 |
+| `cosy.ts` | 端点、签名、region 判定 + 新增 `QoderIdentity`、`qoderIdentityDefaults` | 310 → ~330 |
 | `transform.ts` | 不动 | 215 |
 | `thinking-parser.ts` | 不动 | 244 |
-| `pat.ts` `login.ts` `usage.ts` `qoder-encoding.ts` | 不动 | — |
+| `pat.ts` | 仅改两行以复用 `qoderIdentityDefaults` | 153 |
+| `login.ts` `usage.ts` `qoder-encoding.ts` | 不动 | — |
 
 ### 依赖方向
 
@@ -245,11 +246,14 @@ function stableID(prefix: string, parts: Iterable<string>): string;
 
 `stableChatRecordID` 改为该函数的调用方,构造其 parts 序列。合并后行为必须与现有两个函数逐字节一致 —— 两者本就是同一模式(prefix + `\0` 分隔 + sha256 + 取前 16 位十六进制字符),实施时以固定输入对照旧实现确认。
 
-### `oauth.ts` 新增 `resolveQoderIdentity`
+### 身份解析抽取(分放 `cosy.ts` 与 `oauth.ts`)
+
+**归属必须分两处,否则成环。** `oauth.ts:9` 已 import `pat.js`,而 `pat.ts` 需要复用同一套默认值 —— 若把默认值放进 `oauth.ts`,`pat.ts` 反向 import 就形成 `oauth → pat → oauth` 循环。`cosy.ts` 是所有模块的叶子(零项目内 import),且已导出这两个函数需要的 `isQoderCNMode` 与 `getQoderUserEmailFallback`,故类型与默认值归它。
+
+`cosy.ts` 新增:
 
 ```ts
-/** Identity fields COSY signing needs, with the placeholders used when the
- *  auth store has no answer. */
+/** Identity fields COSY signing needs. */
 export interface QoderIdentity {
   userID: string;
   name: string;
@@ -257,9 +261,24 @@ export interface QoderIdentity {
   machineID: string;
 }
 
+/** The placeholders used when the auth store has no answer. */
 export function qoderIdentityDefaults(mode: string): Omit<QoderIdentity, "machineID">;
+```
+
+`oauth.ts` 新增(需要 `getCachedCredentials`,故留在此处):
+
+```ts
+/** Fill an already-loaded credentials object's gaps with the defaults. */
+export function identityFromCredentials(
+  creds: Partial<QoderIdentity> | null | undefined,
+  mode: string,
+): QoderIdentity;
+
+/** Read the identity from pi's auth store, falling back to placeholders. */
 export function resolveQoderIdentity(providerID: string, mode: string): QoderIdentity;
 ```
+
+**为何需要 `identityFromCredentials` 这第三个函数:** `index.ts:74-79` 已经持有 credentials 对象,若改走 `resolveQoderIdentity` 会重新读一次 `auth.json` —— 那是行为变化(多一次文件 I/O,且 `autoLoginQoderFromEnvironment` 刚写入的凭证与内存对象未必同步)。`resolveQoderIdentity` 因此实现为 `identityFromCredentials(getCachedCredentials("", providerID), mode)`。
 
 消除的 4 处重复:
 
@@ -270,7 +289,7 @@ export function resolveQoderIdentity(providerID: string, mode: string): QoderIde
 | `stream.ts:420-423` | 同样三行 + `machineID` fallback |
 | `pat.ts:149-150` | 语义不同(新建凭证填默认值),但默认值定义相同 |
 
-前三处改为调用 `resolveQoderIdentity`;`pat.ts` 复用 `qoderIdentityDefaults` 取默认值,保持其"新建凭证"的语义不变。
+`index.ts:108-112` 与 `stream.ts:420-423` 改为调用 `resolveQoderIdentity`(二者本就要从 auth 存储读);`index.ts:74-79` 改为调用 `identityFromCredentials`(它已持有对象);`pat.ts` 复用 `qoderIdentityDefaults` 取默认值,保持其"新建凭证"的语义不变。
 
 `resolveQoderIdentity` 保持 `getCachedCredentials` 忽略 accessToken 首参的现有行为,以维持阶段一的行为零变化。修正该问题属阶段二第 1 项,届时只需改这一处 —— 这正是本次抽取的收益。
 
