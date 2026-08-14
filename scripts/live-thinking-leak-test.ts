@@ -18,7 +18,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { buildAuthHeaders, getQoderChatURL, getQoderMode } from "../src/cosy.js";
-import { qoderEncodeBody } from "../src/qoder-encoding.js";
+import { qoderEncodeBodyToBuffer } from "../src/qoder-encoding.js";
 import { transformMessagesForQoder } from "../src/transform.js";
 import {
   THINKING_TAG_VARIANTS,
@@ -100,8 +100,7 @@ async function captureRawStream(model: string, isReasoning: boolean): Promise<Ra
   const creds = loadCreds();
   const messages = transformMessagesForQoder([{ role: "user", content: PROMPT } as never]);
   const body = buildRequestBody(model, messages, isReasoning);
-  const encodedBody = qoderEncodeBody(Buffer.from(JSON.stringify(body)));
-  const encodedBytes = Buffer.from(encodedBody, "utf8");
+  const encodedBytes = qoderEncodeBodyToBuffer(Buffer.from(JSON.stringify(body)));
   const headers = buildAuthHeaders(encodedBytes, url, {
     userID: creds.userID,
     authToken: creds.access,

@@ -18,7 +18,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { buildAuthHeaders, getQoderChatURL, getQoderMode } from "../src/cosy.js";
-import { qoderEncodeBody } from "../src/qoder-encoding.js";
+import { qoderEncodeBodyToBuffer } from "../src/qoder-encoding.js";
 import { transformMessagesForQoder, transformTools } from "../src/transform.js";
 
 const AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
@@ -93,10 +93,9 @@ async function sendRequest(label: string, body: Record<string, unknown>): Promis
   const url = getQoderChatURL(mode);
   const creds = loadCreds();
 
-  // CRITICAL: body must be encoded with qoderEncodeBody, and auth headers
-  // computed on the ENCODED bytes (see stream.ts).
-  const encodedBody = qoderEncodeBody(Buffer.from(JSON.stringify(body)));
-  const encodedBytes = Buffer.from(encodedBody, "utf8");
+  // CRITICAL: body must be encoded with qoderEncodeBodyToBuffer, and auth
+  // headers computed on the ENCODED bytes (see stream.ts).
+  const encodedBytes = qoderEncodeBodyToBuffer(Buffer.from(JSON.stringify(body)));
   const headers = buildAuthHeaders(encodedBytes, url, {
     userID: creds.userID,
     authToken: creds.access,

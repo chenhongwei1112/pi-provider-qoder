@@ -261,9 +261,21 @@ export function buildAuthHeaders(
   const payloadB64 = Buffer.from(JSON.stringify(cosyPayload)).toString("base64");
   const sigPath = computeSigPath(requestURL);
 
-  const bodyStr = body ? (Buffer.isBuffer(body) ? body.toString("utf8") : body) : "";
-  const sigInput = `${payloadB64}\n${cosyKey}\n${timestamp}\n${bodyStr}\n${sigPath}`;
-  const sig = crypto.createHash("md5").update(sigInput).digest("hex");
+  // Fed to md5 in segments rather than concatenated into one string: the body
+  // is the encoded request payload, which reaches hundreds of KB on a long
+  // conversation, and `${...}` would copy it twice per request.
+  const sig = crypto
+    .createHash("md5")
+    .update(payloadB64)
+    .update("\n")
+    .update(cosyKey)
+    .update("\n")
+    .update(timestamp)
+    .update("\n")
+    .update(body ?? "")
+    .update("\n")
+    .update(sigPath)
+    .digest("hex");
 
   const bodyHash = crypto
     .createHash("md5")

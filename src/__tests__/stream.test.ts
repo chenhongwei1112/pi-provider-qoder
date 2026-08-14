@@ -290,4 +290,65 @@ describe("streamQoder", () => {
     expect(msg.content.find((c) => c.type === "toolCall")).toBeUndefined();
     expect(msg.stopReason).toBe("stop");
   });
+
+  it("retries a connection-level 'fetch failed' and streams the retry", async () => {
+    // The failure that ended long conversations: after a tool call outlives
+    // undici's keep-alive window, the pooled socket is dead and the very next
+    // POST rejects in a few ms with TypeError: fetch failed. That is not a
+    // model error — the request never reached the model — so it must be retried
+    // rather than turned into stopReason "error".
+    const socketError = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" }),
+    });
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(socketError)
+      .mockImplementation(
+        async () => new Response(SUCCESS_SSE, { status: 200, headers: { "content-type": "text/event-stream" } }),
+      );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const done = events.find((e) => e.type === "done");
+    expect(done, "expected the retry to produce a normal turn").toBeDefined();
+    const msg = (done as { message: AssistantMessage }).message;
+    expect(msg.stopReason).toBe("stop");
+    expect(events.find((e) => e.type === "error")).toBeUndefined();
+  });
+
+  it("retries a 503 but not a 401", async () => {
+    const unavailable = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("upstream unavailable", { status: 503, statusText: "Service Unavailable" }))
+      .mockImplementation(
+        async () => new Response(SUCCESS_SSE, { status: 200, headers: { "content-type": "text/event-stream" } }),
+      );
+    globalThis.fetch = unavailable as unknown as typeof fetch;
+    const retried = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+    expect(unavailable).toHaveBeenCalledTimes(2);
+    expect(retried.find((e) => e.type === "done")).toBeDefined();
+
+    const unauthorized = vi.fn(async () => new Response("token expired", { status: 401, statusText: "Unauthorized" }));
+    globalThis.fetch = unauthorized as unknown as typeof fetch;
+    const failed = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+    expect(unauthorized).toHaveBeenCalledTimes(1);
+    const err = failed.find((e) => e.type === "error");
+    expect((err as { error: AssistantMessage }).error.errorMessage).toMatch(/401/);
+  });
+
+  it("reports the cause chain instead of a bare 'fetch failed'", async () => {
+    const opaque = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET", name: "SystemError" }),
+    });
+    globalThis.fetch = vi.fn().mockRejectedValue(opaque) as unknown as typeof fetch;
+
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    const err = events.find((e) => e.type === "error");
+    const message = (err as { error: AssistantMessage }).error.errorMessage ?? "";
+    expect(message).toMatch(/fetch failed/);
+    expect(message).toMatch(/ECONNRESET/);
+  });
 });
