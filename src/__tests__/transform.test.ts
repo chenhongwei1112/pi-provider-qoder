@@ -348,4 +348,51 @@ describe("transformMessagesForQoder", () => {
     expect(tool.role).toBe("tool");
     expect(tool.tool_call_id).toBe("call_abc123");
   });
+
+  it("drops the tool result of an aborted assistant message that carried tool calls", () => {
+    // Interrupting a running tool leaves an aborted assistant message plus its
+    // result. Dropping only the assistant orphans the `tool` message: an
+    // OpenAI-shaped tool result is only valid directly after the assistant
+    // message holding the matching tool_calls, and upstreams reject the whole
+    // request with "tool must follow a message with tool_calls".
+    const msgs = [
+      { role: "user", content: "run it" },
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call_1", name: "bash", arguments: { command: "ls" } }],
+        stopReason: "aborted",
+      },
+      { role: "toolResult", toolCallId: "call_1", content: "a.txt" },
+      { role: "user", content: "again" },
+    ] as unknown as Message[];
+
+    const result = transformMessagesForQoder(msgs);
+
+    expect(result.map((m) => m.role)).toEqual(["user", "user"]);
+    expect(result.some((m) => m.role === "tool")).toBe(false);
+  });
+
+  it("keeps tool results whose assistant message survived", () => {
+    // Only the dropped assistant's own calls are orphaned; an unrelated pair in
+    // the same history must be left alone.
+    const msgs = [
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "keep_1", name: "read", arguments: {} }],
+        stopReason: "toolUse",
+      },
+      { role: "toolResult", toolCallId: "keep_1", content: "kept" },
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "drop_1", name: "bash", arguments: {} }],
+        stopReason: "error",
+      },
+      { role: "toolResult", toolCallId: "drop_1", content: "dropped" },
+    ] as unknown as Message[];
+
+    const result = transformMessagesForQoder(msgs);
+
+    expect(result.map((m) => m.role)).toEqual(["assistant", "tool"]);
+    expect((result[1] as { tool_call_id: string }).tool_call_id).toBe("keep_1");
+  });
 });

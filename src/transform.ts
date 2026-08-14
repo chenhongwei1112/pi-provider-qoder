@@ -71,6 +71,13 @@ export function transformTools(tools: Tool[]): QoderTool[] {
 
 export function transformMessagesForQoder(messages: Message[]): QoderMessage[] {
   const normalizedMessages: QoderMessage[] = [];
+  // Tool calls belonging to assistant messages that were dropped below. Their
+  // results have to go too: an OpenAI-shaped `tool` message is only valid
+  // directly after the assistant message carrying the matching tool_calls, and
+  // upstreams reject the request outright ("tool must follow a message with
+  // tool_calls"). Assistant messages always precede their results, so one pass
+  // is enough.
+  const droppedToolCallIDs = new Set<string>();
 
   for (const msg of messages) {
     // Skip error or aborted messages
@@ -78,6 +85,16 @@ export function transformMessagesForQoder(messages: Message[]): QoderMessage[] {
       msg.role === "assistant" &&
       ((msg as AssistantMessage).stopReason === "error" || (msg as AssistantMessage).stopReason === "aborted")
     ) {
+      const dropped = msg as AssistantMessage;
+      if (Array.isArray(dropped.content)) {
+        for (const block of dropped.content) {
+          if (block.type === "toolCall") droppedToolCallIDs.add((block as ToolCall).id);
+        }
+      }
+      continue;
+    }
+
+    if (msg.role === "toolResult" && droppedToolCallIDs.has((msg as ToolResultMessage).toolCallId)) {
       continue;
     }
 

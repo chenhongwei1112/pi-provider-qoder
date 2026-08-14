@@ -351,4 +351,151 @@ describe("streamQoder", () => {
     expect(message).toMatch(/fetch failed/);
     expect(message).toMatch(/ECONNRESET/);
   });
+
+  it("keeps tool call arguments intact when a <thinking> tag leaks into content", async () => {
+    // Qoder's backend leaks literal thinking tags into the content channel. The
+    // parser used to splice the thinking block in front of the open text block,
+    // renumbering the toolCall block while this function still held the old
+    // index — so the finalizer wrote `arguments` onto the text block and the real
+    // tool call was handed to the agent loop with `{}`. pi persists that message,
+    // so the corruption also went back upstream on the next turn.
+    const sse =
+      sseEnvelope(chunk({ content: "Hello " })) +
+      sseEnvelope(
+        chunk({
+          tool_calls: [{ index: 0, id: "call_1", function: { name: "bash", arguments: '{"command":"ls"}' } }],
+        }),
+      ) +
+      sseEnvelope(chunk({ content: "<thinking>hmm</thinking>" })) +
+      sseEnvelope(finishChunk("tool_calls")) +
+      DONE_SSE;
+    globalThis.fetch = mockFetch(sse);
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    const done = events.find((e) => e.type === "done");
+    const msg = (done as { message: AssistantMessage }).message;
+    const toolCall = msg.content.find((c) => c.type === "toolCall") as ToolCall | undefined;
+    expect(toolCall?.name).toBe("bash");
+    expect(toolCall?.arguments).toEqual({ command: "ls" });
+    // No other block may have picked up tool-call fields.
+    for (const block of msg.content) {
+      if (block.type !== "toolCall") {
+        expect(block, `${block.type} block must not carry tool call fields`).not.toHaveProperty("arguments");
+      }
+    }
+    expect(msg.stopReason).toBe("toolUse");
+  });
+
+  it("translates finish_reason instead of passing the upstream vocabulary through", async () => {
+    // pi's stopReason is a closed set. `content_filter` is not in it, and a cast
+    // used to put it there, leaving pi with a reason it has no case for.
+    globalThis.fetch = mockFetch(
+      sseEnvelope(chunk({ content: "partial" })) + sseEnvelope(finishChunk("content_filter")) + DONE_SSE,
+    );
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    const done = events.find((e) => e.type === "done") as { reason: string; message: AssistantMessage } | undefined;
+    expect(done?.message.stopReason).toBe("stop");
+    expect(done?.reason).toBe("stop");
+  });
+
+  it("maps an unrecognised finish_reason to stop", async () => {
+    globalThis.fetch = mockFetch(
+      sseEnvelope(chunk({ content: "partial" })) + sseEnvelope(finishChunk("something_new")) + DONE_SSE,
+    );
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    const done = events.find((e) => e.type === "done") as { reason: string } | undefined;
+    expect(done?.reason).toBe("stop");
+  });
+
+  it("errors when finish_reason=tool_calls arrives with no usable tool call", async () => {
+    // A tool_calls delta with neither id nor name never becomes a block. Saying
+    // "toolUse" anyway hands the agent loop a message with nothing to run, and
+    // the turn ends mid-task without an error.
+    const sse =
+      sseEnvelope(chunk({ content: "working" })) +
+      sseEnvelope(chunk({ tool_calls: [{ index: 0, function: { arguments: '{"a":1}' } }] })) +
+      sseEnvelope(finishChunk("tool_calls")) +
+      DONE_SSE;
+    globalThis.fetch = mockFetch(sse);
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    expect(events.find((e) => e.type === "done")).toBeUndefined();
+    const err = events.find((e) => e.type === "error");
+    const msg = (err as { error: AssistantMessage }).error;
+    expect(msg.stopReason).toBe("error");
+    expect(msg.errorMessage).toMatch(/no usable tool call/);
+    // The unattributable argument delta must not have been reported against
+    // another block: contentIndex 0 is the text block.
+    const text = msg.content.find((c) => c.type === "text");
+    expect(text && "text" in text ? text.text : "").toBe("working");
+  });
+
+  it("finishes on [DONE] without waiting for the server to close the socket", async () => {
+    // The terminator used to `continue`, leaving the loop parked on
+    // reader.read(). A gateway that holds the socket open then kept the turn
+    // alive until the 300s idle watchdog fired.
+    const body = SUCCESS_SSE;
+    const neverClosing = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(body));
+        // Deliberately no controller.close().
+      },
+    });
+    globalThis.fetch = vi.fn(
+      async () => new Response(neverClosing, { status: 200, headers: { "content-type": "text/event-stream" } }),
+    ) as unknown as typeof fetch;
+
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    const done = events.find((e) => e.type === "done");
+    expect(done, "expected the turn to finish on [DONE]").toBeDefined();
+    expect((done as { message: AssistantMessage }).message.stopReason).toBe("stop");
+  }, 5000);
+
+  it("waits as long as Retry-After says on 429, not its own backoff", async () => {
+    // Retry-After: 1s. The built-in backoff for the first retry is 500ms ±30%,
+    // so a run that respects the header cannot finish the gap in under ~900ms
+    // and a run that ignores it cannot take that long.
+    const attemptTimes: number[] = [];
+    const throttled = vi.fn(async () => {
+      attemptTimes.push(Date.now());
+      if (attemptTimes.length === 1) {
+        return new Response("slow down", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: { "retry-after": "1" },
+        });
+      }
+      return new Response(SUCCESS_SSE, { status: 200, headers: { "content-type": "text/event-stream" } });
+    });
+    globalThis.fetch = throttled as unknown as typeof fetch;
+
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    expect(throttled).toHaveBeenCalledTimes(2);
+    expect(events.find((e) => e.type === "done")).toBeDefined();
+    expect(attemptTimes[1] - attemptTimes[0]).toBeGreaterThanOrEqual(900);
+  }, 5000);
+
+  it("gives up instead of retrying when Retry-After exceeds the ceiling", async () => {
+    // Ignoring Retry-After meant a 429 was retried three times 500ms apart,
+    // tripling exactly the load that got the client throttled.
+    const throttled = vi.fn(
+      async () =>
+        new Response("quota exhausted", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: { "retry-after": "3600" },
+        }),
+    );
+    globalThis.fetch = throttled as unknown as typeof fetch;
+
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    expect(throttled).toHaveBeenCalledTimes(1);
+    const err = events.find((e) => e.type === "error");
+    expect((err as { error: AssistantMessage }).error.errorMessage).toMatch(/429/);
+  });
 });

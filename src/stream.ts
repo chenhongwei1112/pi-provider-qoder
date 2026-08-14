@@ -77,6 +77,44 @@ const RETRYABLE_STATUSES: Record<number, true> = {
   504: true,
 };
 
+/**
+ * Qoder speaks OpenAI's `finish_reason` vocabulary; pi's `stopReason` is a
+ * closed set (`stop | length | toolUse | error | aborted`) and the `done` event
+ * narrows it further to `stop | length | toolUse`.
+ *
+ * These are mapped explicitly because a cast is not a translation: casting
+ * `finish_reason` straight into `stopReason` shipped `"tool_calls"` and
+ * `"content_filter"` to pi as stopReason values it has no case for, and the
+ * turn ended without output and without an error.
+ */
+const FINISH_REASON_TO_STOP_REASON: Record<string, "stop" | "length" | "toolUse"> = {
+  stop: "stop",
+  end_turn: "stop",
+  length: "length",
+  max_tokens: "length",
+  tool_calls: "toolUse",
+  function_call: "toolUse",
+  // Upstream refused to continue. pi has no stopReason for a content filter, so
+  // report the turn as finished — whatever was generated before the refusal is
+  // still worth keeping.
+  content_filter: "stop",
+};
+
+/**
+ * `Retry-After`, in ms. Accepts both forms RFC 9110 allows: delay-seconds and
+ * an HTTP-date. Returns undefined when the header is absent or unparseable.
+ */
+function parseRetryAfterMs(headerValue: string | null): number | undefined {
+  if (!headerValue) return undefined;
+  const trimmed = headerValue.trim();
+  if (trimmed === "") return undefined;
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = Date.parse(trimmed);
+  if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
+  return undefined;
+}
+
 /** Error messages undici raises for a connection that died under us. */
 const RETRYABLE_ERROR_MESSAGES: Record<string, true> = {
   "fetch failed": true,
@@ -235,7 +273,7 @@ async function openQoderStream(request: OpenStreamRequest): Promise<OpenedQoderS
         const errText = await response.text().catch(() => "");
         throw Object.assign(
           new Error(`Qoder API request failed: ${response.status} ${response.statusText}. Response: ${errText}`),
-          { status: response.status },
+          { status: response.status, retryAfterMs: parseRetryAfterMs(response.headers.get("retry-after")) },
         );
       }
 
@@ -264,16 +302,32 @@ async function openQoderStream(request: OpenStreamRequest): Promise<OpenedQoderS
       lastError = timedOutAfterMs !== undefined ? describeStreamError(e) : e;
       if (!retryable || attempt === MAX_SEND_ATTEMPTS) break;
 
-      const delay = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
-      const jittered = Math.max(0, delay + delay * 0.3 * (Math.random() * 2 - 1));
+      // A server that sent `Retry-After` has told us exactly how long to wait;
+      // exponential backoff would only guess, and on 429 the guess (500ms) is
+      // short enough that retrying just triples the load that got us throttled.
+      // Waiting longer than the ceiling is worse than failing: pi can surface a
+      // rate-limit error and let the user decide.
+      const retryAfterMs =
+        e && typeof e === "object" && "retryAfterMs" in e && typeof e.retryAfterMs === "number"
+          ? e.retryAfterMs
+          : undefined;
+      if (retryAfterMs !== undefined && retryAfterMs > RETRY_MAX_DELAY_MS) break;
+
+      let waitMs: number;
+      if (retryAfterMs !== undefined) {
+        waitMs = retryAfterMs;
+      } else {
+        const delay = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+        waitMs = Math.max(0, delay + delay * 0.3 * (Math.random() * 2 - 1));
+      }
       if (process.env.QODER_DEBUG) {
         console.error(
           `[pi-provider-qoder] attempt ${attempt}/${MAX_SEND_ATTEMPTS} failed (${
             lastError instanceof Error ? lastError.message : String(lastError)
-          }); retrying in ${Math.round(jittered)}ms`,
+          }); retrying in ${Math.round(waitMs)}ms`,
         );
       }
-      await sleep(jittered, callerSignal);
+      await sleep(waitMs, callerSignal);
     }
   }
 
@@ -490,6 +544,9 @@ export function streamQoder(
 
       const decoder = new TextDecoder();
       let buffer = "";
+      // Set when the terminator arrives, so the outer read loop stops instead of
+      // waiting for the server to close the socket.
+      let streamDone = false;
 
       let contentBlockIndex = -1;
       let thinkingBlockIndex = -1;
@@ -530,6 +587,7 @@ export function streamQoder(
 
           const dataStr = line.substring(5).trim();
           if (dataStr === "[DONE]") {
+            streamDone = true;
             break;
           }
 
@@ -540,7 +598,15 @@ export function streamQoder(
             }
 
             const innerStr = envelope.body;
-            if (!innerStr || innerStr === "[DONE]") continue;
+            if (innerStr === "[DONE]") {
+              // Qoder wraps the terminator as `{ body: "[DONE]" }`, and nothing
+              // follows it. `continue` used to leave the outer loop blocked on
+              // reader.read(), so a gateway that kept the socket open held the
+              // turn for the full 300s idle timeout before finishing.
+              streamDone = true;
+              break;
+            }
+            if (!innerStr) continue;
 
             const inner = JSON.parse(innerStr);
             if (inner.id) output.responseId = inner.id as string;
@@ -667,6 +733,17 @@ export function streamQoder(
                         arguments: {},
                       } satisfies ToolCall);
                       stream.push({ type: "toolcall_start", contentIndex: state.contentIndex, partial: output });
+                      // Arguments that arrived before the call was identifiable
+                      // were buffered rather than emitted (see below); replay
+                      // them now that the block owns a contentIndex.
+                      if (state.arguments) {
+                        stream.push({
+                          type: "toolcall_delta",
+                          contentIndex: state.contentIndex,
+                          delta: state.arguments,
+                          partial: output,
+                        });
+                      }
                     }
 
                     // id and name can arrive after the block is open; keep it
@@ -679,22 +756,39 @@ export function streamQoder(
 
                     if (tc.function?.arguments) {
                       const argDelta = tc.function.arguments;
+                      // Accumulate unconditionally, but only emit once the block
+                      // exists. `state.contentIndex` defaults to 0, so a delta
+                      // emitted before `toolcall_start` addressed whatever block
+                      // happens to sit at index 0 — usually a text block.
+                      const alreadyEmitted = state.emittedStart === true;
                       state.arguments += argDelta;
-                      stream.push({
-                        type: "toolcall_delta",
-                        contentIndex: state.contentIndex,
-                        delta: argDelta,
-                        partial: output,
-                      });
+                      if (alreadyEmitted) {
+                        stream.push({
+                          type: "toolcall_delta",
+                          contentIndex: state.contentIndex,
+                          delta: argDelta,
+                          partial: output,
+                        });
+                      }
                     }
                   }
                 }
               }
 
               if (choice.finish_reason) {
-                // Preserve the real upstream finish_reason (e.g. "length",
-                // "content_filter") instead of forcing "stop" later.
-                output.stopReason = choice.finish_reason as AssistantMessage["stopReason"];
+                const upstream = String(choice.finish_reason);
+                const mapped = FINISH_REASON_TO_STOP_REASON[upstream];
+                if (mapped) {
+                  output.stopReason = mapped;
+                } else {
+                  // An unknown reason is still a completed generation; treating
+                  // it as "stop" keeps the output. Passing it through untranslated
+                  // is what produced stopReason values pi silently ignored.
+                  output.stopReason = "stop";
+                  if (process.env.QODER_DEBUG) {
+                    console.error(`[pi-provider-qoder] unmapped finish_reason ${JSON.stringify(upstream)}`);
+                  }
+                }
               }
             }
           } catch (e) {
@@ -710,6 +804,7 @@ export function streamQoder(
             throw e;
           }
         }
+        if (streamDone) break;
       }
 
       if (thinkingParser) {
@@ -754,10 +849,16 @@ export function streamQoder(
       // tool call is what turned a malformed stream into a silent dead end.
       if (toolCallsState.some((state) => state?.emittedStart)) {
         output.stopReason = "toolUse";
+      } else if (output.stopReason === "toolUse") {
+        // Upstream said finish_reason=tool_calls and then never sent a call the
+        // agent could run. Failing loudly beats handing pi a "toolUse" message
+        // with no tool in it, which ends the turn mid-task without an error.
+        throw new Error(
+          "Qoder stream reported finish_reason=tool_calls but sent no usable tool call (no id or name in any delta)",
+        );
       }
-      // Otherwise keep whatever finish_reason set upstream (defaults to "stop").
-      // Never overwrite a meaningful finish_reason ("length", "content_filter",
-      // ...) with "stop".
+      // Otherwise keep whatever the upstream finish_reason mapped to; never
+      // overwrite a meaningful "length" with "stop".
       stream.push({
         type: "done",
         reason: output.stopReason as Extract<AssistantMessage["stopReason"], "stop" | "length" | "toolUse">,

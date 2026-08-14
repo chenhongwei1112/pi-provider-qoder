@@ -213,14 +213,22 @@ export class ThinkingTagParser {
   private emitThinking(thinking: string): void {
     if (!thinking) return;
     if (this.thinkingBlockIndex === null) {
-      if (this.textBlockIndex !== null) {
-        this.thinkingBlockIndex = this.textBlockIndex;
-        this.output.content.splice(this.thinkingBlockIndex, 0, { type: "thinking", thinking: "" });
-        this.textBlockIndex = this.textBlockIndex + 1;
-      } else {
-        this.thinkingBlockIndex = this.output.content.length;
-        this.output.content.push({ type: "thinking", thinking: "" });
-      }
+      // Append only, never splice.
+      //
+      // An earlier version spliced the thinking block in FRONT of an already
+      // open text block so a transcript would read "thoughts first". That
+      // broke the one invariant the event stream has: `contentIndex` is
+      // assigned when a block is announced and must keep pointing at that same
+      // block forever. Splicing shifted every later block by one while the
+      // indices already handed out — `text_start`'s, and `stream.ts`'s
+      // `state.contentIndex` for each open tool call — kept their pre-splice
+      // values. A tool call's arguments were then written onto a text block and
+      // the real toolCall block was finalised with `{}`, which the agent loop
+      // executed and pi persisted into the session history.
+      //
+      // Blocks therefore appear in the order the model actually produced them.
+      this.thinkingBlockIndex = this.output.content.length;
+      this.output.content.push({ type: "thinking", thinking: "" });
       this.stream.push({ type: "thinking_start", contentIndex: this.thinkingBlockIndex, partial: this.output });
     }
     const block = this.output.content[this.thinkingBlockIndex] as ThinkingContent;

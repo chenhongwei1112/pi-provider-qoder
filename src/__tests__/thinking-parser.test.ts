@@ -71,10 +71,13 @@ describe("ThinkingTagParser", () => {
     parser.processChunk("Hello <thinking>reasoning here</thinking> world");
     parser.finalize();
 
-    // Parser inserts thinking block before existing text via splice, then creates a new text block after
+    // Blocks appear in the order the model produced them. The parser must not
+    // reorder them: `contentIndex` is handed out when a block is announced, so
+    // splicing a thinking block in front of an open text block would leave every
+    // already-published index pointing at the wrong content.
     expect(output.content).toHaveLength(3);
-    expect(output.content[0]).toMatchObject({ type: "thinking", thinking: "reasoning here" });
-    expect(output.content[1]).toMatchObject({ type: "text", text: "Hello " });
+    expect(output.content[0]).toMatchObject({ type: "text", text: "Hello " });
+    expect(output.content[1]).toMatchObject({ type: "thinking", thinking: "reasoning here" });
     expect(output.content[2]).toMatchObject({ type: "text", text: " world" });
   });
 
@@ -95,8 +98,8 @@ describe("ThinkingTagParser", () => {
     parser.finalize();
 
     expect(output.content).toHaveLength(3);
-    expect(output.content[0]).toMatchObject({ type: "thinking", thinking: "reasoning" });
-    expect(output.content[1]).toMatchObject({ type: "text", text: "Hello " });
+    expect(output.content[0]).toMatchObject({ type: "text", text: "Hello " });
+    expect(output.content[1]).toMatchObject({ type: "thinking", thinking: "reasoning" });
     expect(output.content[2]).toMatchObject({ type: "text", text: " world" });
   });
 
@@ -129,8 +132,8 @@ describe("ThinkingTagParser", () => {
     parser.finalize();
 
     expect(output.content).toHaveLength(3);
-    expect(output.content[0]).toMatchObject({ type: "thinking", thinking: "part1 part2" });
-    expect(output.content[1]).toMatchObject({ type: "text", text: "Hello " });
+    expect(output.content[0]).toMatchObject({ type: "text", text: "Hello " });
+    expect(output.content[1]).toMatchObject({ type: "thinking", thinking: "part1 part2" });
     expect(output.content[2]).toMatchObject({ type: "text", text: " world" });
   });
 
@@ -141,8 +144,8 @@ describe("ThinkingTagParser", () => {
     parser.finalize();
 
     expect(output.content).toHaveLength(2);
-    expect(output.content[0]).toMatchObject({ type: "thinking", thinking: "body" });
-    expect(output.content[1]).toMatchObject({ type: "text", text: "text " });
+    expect(output.content[0]).toMatchObject({ type: "text", text: "text " });
+    expect(output.content[1]).toMatchObject({ type: "thinking", thinking: "body" });
   });
 
   // ── Multiple thinking blocks ──────────────────────────────────────────
@@ -293,6 +296,39 @@ describe("ThinkingTagParser", () => {
     expect(text).not.toContain("</thinking>");
     expect(text).toContain("intro");
     expect(text).toContain("outro");
+  });
+
+  // ── contentIndex invariant ─────────────────────────────────────────────
+
+  it("never reassigns a contentIndex it has already announced", () => {
+    // The parser used to splice a thinking block in front of an open text block,
+    // which renumbered every block after it while the indices already published
+    // in `text_start` — and the ones `stream.ts` holds for open tool calls —
+    // kept their old values. Consumers key off contentIndex, so a block must
+    // never change identity once announced.
+    const { stream: localStream, events } = createMockStream();
+    const parser = new ThinkingTagParser(output, localStream);
+    parser.processChunk("Hello ");
+    parser.processChunk("<thinking>hmm</thinking>");
+    parser.processChunk(" world");
+    parser.finalize();
+
+    const declared = new Map<number, string>();
+    for (const event of events) {
+      const e = event as unknown as { type: string; contentIndex?: number };
+      if (e.contentIndex === undefined) continue;
+      const kind = e.type.startsWith("thinking") ? "thinking" : e.type.startsWith("text") ? "text" : e.type;
+      const previous = declared.get(e.contentIndex);
+      if (previous === undefined) declared.set(e.contentIndex, kind);
+      else expect(kind, `contentIndex ${e.contentIndex} changed from ${previous} to ${kind}`).toBe(previous);
+    }
+
+    // Every announced index must resolve to a block of the same kind, and no
+    // block may exist that was never announced.
+    expect(declared.size).toBe(output.content.length);
+    for (const [index, kind] of declared) {
+      expect(output.content[index]?.type).toBe(kind);
+    }
   });
 
   // ── stripThinkingTags helper ───────────────────────────────────────────
