@@ -454,6 +454,55 @@ describe("streamQoder", () => {
     expect((done as { message: AssistantMessage }).message.stopReason).toBe("stop");
   }, 5000);
 
+  it("stops consuming payloads that follow the wrapped [DONE] in the same chunk", async () => {
+    // splitSSEData is greedy: it hands back every complete `data:` line in the
+    // buffer and knows nothing about [DONE], so the orchestration loop is what
+    // has to stop at the terminator. The loop it replaced broke there. Both
+    // trailing envelopes are observable if they are wrongly processed: the
+    // content delta would land in the message, and the 500 would throw and turn
+    // the turn into an error event.
+    const sse =
+      sseEnvelope(chunk({ content: "before", role: "assistant" })) +
+      sseEnvelope(finishChunk("stop")) +
+      DONE_SSE +
+      sseEnvelope(chunk({ content: "AFTER-DONE", role: "assistant" })) +
+      sseEnvelope({ code: "provider_error", message: "after done" }, 500, "Internal Server Error");
+    globalThis.fetch = mockFetch(sse);
+
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    expect(events.find((e) => e.type === "error")).toBeUndefined();
+    const done = events.find((e) => e.type === "done");
+    expect(done, "expected the turn to finish on [DONE]").toBeDefined();
+    const msg = done && "message" in done ? done.message : undefined;
+    expect(msg?.stopReason).toBe("stop");
+    const text = msg?.content.find((c) => c.type === "text");
+    expect(text && "text" in text ? text.text : "").toBe("before");
+    expect(events.some((e) => "delta" in e && String(e.delta).includes("AFTER-DONE"))).toBe(false);
+  });
+
+  it("stops consuming payloads that follow a bare data: [DONE] line", async () => {
+    // Same contract for the unwrapped terminator, which is handled before the
+    // envelope is even parsed.
+    const sse =
+      sseEnvelope(chunk({ content: "before", role: "assistant" })) +
+      sseEnvelope(finishChunk("stop")) +
+      "data: [DONE]\n\n" +
+      sseEnvelope(chunk({ content: "AFTER-DONE", role: "assistant" })) +
+      sseEnvelope({ code: "provider_error", message: "after done" }, 500, "Internal Server Error");
+    globalThis.fetch = mockFetch(sse);
+
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    expect(events.find((e) => e.type === "error")).toBeUndefined();
+    const done = events.find((e) => e.type === "done");
+    expect(done, "expected the turn to finish on [DONE]").toBeDefined();
+    const msg = done && "message" in done ? done.message : undefined;
+    expect(msg?.stopReason).toBe("stop");
+    const text = msg?.content.find((c) => c.type === "text");
+    expect(text && "text" in text ? text.text : "").toBe("before");
+  });
+
   it("waits as long as Retry-After says on 429, not its own backoff", async () => {
     // Retry-After: 1s. The built-in backoff for the first retry is 500ms ±30%,
     // so a run that respects the header cannot finish the gap in under ~900ms

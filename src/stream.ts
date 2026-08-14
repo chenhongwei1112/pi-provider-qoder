@@ -6,9 +6,6 @@ import type {
   Context,
   Model,
   SimpleStreamOptions,
-  TextContent,
-  ThinkingContent,
-  ToolCall,
 } from "@earendil-works/pi-ai";
 import * as PiAi from "@earendil-works/pi-ai";
 import {
@@ -19,44 +16,13 @@ import {
   getQoderUserEmailFallback,
   isQoderCNMode,
 } from "./cosy.js";
+import { QoderEventTranslator } from "./events.js";
 import { getCachedModelConfig } from "./models.js";
 import { getCachedCredentials } from "./oauth.js";
 import { qoderEncodeBodyToBuffer } from "./qoder-encoding.js";
-import { stripThinkingTags, ThinkingTagParser } from "./thinking-parser.js";
+import { splitSSEData } from "./sse.js";
 import { transformMessagesForQoder, transformTools } from "./transform.js";
 import { type OpenedQoderStream, openQoderStream } from "./transport.js";
-
-interface ToolCallState {
-  arguments: string;
-  id: string;
-  name: string;
-  emittedStart?: boolean;
-  emittedEnd?: boolean;
-  contentIndex: number;
-}
-
-/**
- * Qoder speaks OpenAI's `finish_reason` vocabulary; pi's `stopReason` is a
- * closed set (`stop | length | toolUse | error | aborted`) and the `done` event
- * narrows it further to `stop | length | toolUse`.
- *
- * These are mapped explicitly because a cast is not a translation: casting
- * `finish_reason` straight into `stopReason` shipped `"tool_calls"` and
- * `"content_filter"` to pi as stopReason values it has no case for, and the
- * turn ended without output and without an error.
- */
-const FINISH_REASON_TO_STOP_REASON: Record<string, "stop" | "length" | "toolUse"> = {
-  stop: "stop",
-  end_turn: "stop",
-  length: "length",
-  max_tokens: "length",
-  tool_calls: "toolUse",
-  function_call: "toolUse",
-  // Upstream refused to continue. pi has no stopReason for a content filter, so
-  // report the turn as finished — whatever was generated before the refusal is
-  // still worth keeping.
-  content_filter: "stop",
-};
 
 function stableHash(prefix: string, ...inputs: string[]): string {
   const hash = crypto.createHash("sha256");
@@ -267,21 +233,17 @@ export function streamQoder(
       let pendingChunk: Uint8Array | undefined = opened.firstChunk;
 
       const decoder = new TextDecoder();
-      let buffer = "";
-      // Set when the terminator arrives, so the outer read loop stops instead of
-      // waiting for the server to close the socket.
-      let streamDone = false;
-
-      let contentBlockIndex = -1;
-      let thinkingBlockIndex = -1;
-      const toolCallsState: ToolCallState[] = [];
-
       const thinkingEnabled = (options?.reasoning as unknown) !== false && (options?.reasoning as unknown) !== "off";
-      const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
+      const translator = new QoderEventTranslator(output, stream, { thinkingEnabled });
 
       stream.push({ type: "start", partial: output });
 
-      while (true) {
+      let buffer = "";
+      // Set when the terminator arrives, so the outer read loop stops instead of
+      // waiting for the server to close the socket.
+      let finished = false;
+
+      while (!finished) {
         let chunk: Uint8Array;
         if (pendingChunk) {
           chunk = pendingChunk;
@@ -299,295 +261,21 @@ export function streamQoder(
         }
 
         buffer += decoder.decode(chunk, { stream: true });
+        const { payloads, rest } = splitSSEData(buffer);
+        buffer = rest;
 
-        while (true) {
-          const lineEnd = buffer.indexOf("\n");
-          if (lineEnd === -1) break;
-
-          const line = buffer.substring(0, lineEnd).trim();
-          buffer = buffer.substring(lineEnd + 1);
-
-          if (!line.startsWith("data:")) continue;
-
-          const dataStr = line.substring(5).trim();
-          if (dataStr === "[DONE]") {
-            streamDone = true;
+        // splitSSEData is greedy and knows no terminator, so stop consuming at
+        // the first "done": anything the server sent after it is discarded,
+        // which is what the inlined loop's break did.
+        for (const payload of payloads) {
+          if (translator.push(payload) === "done") {
+            finished = true;
             break;
           }
-
-          try {
-            const envelope = JSON.parse(dataStr);
-            if (envelope.statusCodeValue && envelope.statusCodeValue !== 200) {
-              throw new Error(`Upstream status ${envelope.statusCodeValue}: ${envelope.body}`);
-            }
-
-            const innerStr = envelope.body;
-            if (innerStr === "[DONE]") {
-              // Qoder wraps the terminator as `{ body: "[DONE]" }`, and nothing
-              // follows it. `continue` used to leave the outer loop blocked on
-              // reader.read(), so a gateway that kept the socket open held the
-              // turn for the full 300s idle timeout before finishing.
-              streamDone = true;
-              break;
-            }
-            if (!innerStr) continue;
-
-            const inner = JSON.parse(innerStr);
-            if (inner.id) output.responseId = inner.id as string;
-            if (inner.model) output.responseModel = inner.model as string;
-            if (inner.usage) {
-              const u = inner.usage as {
-                prompt_tokens?: number;
-                completion_tokens?: number;
-                total_tokens?: number;
-                completion_tokens_details?: { reasoning_tokens?: number };
-                prompt_tokens_details?: {
-                  cacheable_tokens?: number;
-                  cached_tokens?: number;
-                  cache_write_tokens?: number;
-                };
-              };
-              // pi-core computes `promptTokens = input + cacheRead + cacheWrite`
-              // (Anthropic convention: `input` EXCLUDES cached/written tokens).
-              // Qoder follows OpenAI semantics where `prompt_tokens` INCLUDES
-              // `cached_tokens`, so subtract cacheRead (and cache_write_tokens
-              // when reported) to match the contract pi-ai's own OpenAI
-              // provider uses. `cacheable_tokens` is a capacity metric, not a
-              // write count (it is 0 even on first-turn writes), so it is NOT
-              // mapped to cacheWrite.
-              const promptTokens = u.prompt_tokens ?? 0;
-              const cacheReadTokens = u.prompt_tokens_details?.cached_tokens ?? 0;
-              const cacheWriteTokens = u.prompt_tokens_details?.cache_write_tokens ?? 0;
-              output.usage.input = Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens);
-              output.usage.output = u.completion_tokens ?? 0;
-              output.usage.totalTokens = u.total_tokens ?? 0;
-              output.usage.cacheRead = cacheReadTokens;
-              output.usage.cacheWrite = cacheWriteTokens;
-            }
-            if (inner.choices && inner.choices.length > 0) {
-              const choice = inner.choices[0];
-              const delta = choice.delta;
-
-              if (delta) {
-                // 1. Process reasoning/thinking content (API reasoning)
-                if (delta.reasoning_content) {
-                  // Qoder's backend sometimes routes a literal `<thinking>`
-                  // opener into reasoning_content (with the matching
-                  // `</thinking>` closer landing in the content stream). Strip
-                  // tag artifacts so the thinking block stays clean, matching
-                  // the SDK's ContentBlock model.
-                  const reasoningChunk = stripThinkingTags(delta.reasoning_content);
-                  if (reasoningChunk) {
-                    if (thinkingBlockIndex === -1) {
-                      thinkingBlockIndex = output.content.length;
-                      output.content.push({ type: "thinking", thinking: "" });
-                      stream.push({ type: "thinking_start", contentIndex: thinkingBlockIndex, partial: output });
-                    }
-                    const block = output.content[thinkingBlockIndex] as ThinkingContent;
-                    block.thinking += reasoningChunk;
-                    stream.push({
-                      type: "thinking_delta",
-                      contentIndex: thinkingBlockIndex,
-                      delta: reasoningChunk,
-                      partial: output,
-                    });
-                  }
-                }
-
-                // 2. Process text content
-                if (delta.content) {
-                  // End API thinking block if active
-                  if (thinkingBlockIndex !== -1) {
-                    const block = output.content[thinkingBlockIndex] as ThinkingContent;
-                    stream.push({
-                      type: "thinking_end",
-                      contentIndex: thinkingBlockIndex,
-                      content: block.thinking,
-                      partial: output,
-                    });
-                    thinkingBlockIndex = -1;
-                  }
-
-                  if (thinkingParser) {
-                    thinkingParser.processChunk(delta.content);
-                  } else {
-                    if (contentBlockIndex === -1) {
-                      contentBlockIndex = output.content.length;
-                      output.content.push({ type: "text", text: "" });
-                      stream.push({ type: "text_start", contentIndex: contentBlockIndex, partial: output });
-                    }
-                    const block = output.content[contentBlockIndex] as TextContent;
-                    block.text += delta.content;
-                    stream.push({
-                      type: "text_delta",
-                      contentIndex: contentBlockIndex,
-                      delta: delta.content,
-                      partial: output,
-                    });
-                  }
-                }
-
-                // 3. Process tool calls
-                if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
-                  for (const tc of delta.tool_calls) {
-                    const idx = tc.index ?? 0;
-                    if (!toolCallsState[idx]) {
-                      toolCallsState[idx] = { arguments: "", id: "", name: "", contentIndex: 0 };
-                    }
-                    const state = toolCallsState[idx];
-                    if (tc.id) state.id = tc.id;
-                    if (tc.function?.name) state.name = tc.function.name;
-
-                    // Open the block as soon as the call is IDENTIFIABLE, not
-                    // when its first argument byte arrives. A call whose
-                    // arguments are absent or an empty string — a no-argument
-                    // tool, or a model that sends id+name and then stops — used
-                    // to create a toolCallsState entry and no content block, so
-                    // the finalizer below saw a non-empty state array, set
-                    // stopReason "toolUse", and handed back a message with no
-                    // tool call in it. The agent loop then had nothing to run
-                    // and the turn simply ended, mid-task and without an error.
-                    if (state.emittedStart === undefined && (state.id || state.name)) {
-                      state.emittedStart = true;
-                      state.contentIndex = output.content.length;
-                      output.content.push({
-                        type: "toolCall",
-                        id: state.id,
-                        name: state.name,
-                        arguments: {},
-                      } satisfies ToolCall);
-                      stream.push({ type: "toolcall_start", contentIndex: state.contentIndex, partial: output });
-                      // Arguments that arrived before the call was identifiable
-                      // were buffered rather than emitted (see below); replay
-                      // them now that the block owns a contentIndex.
-                      if (state.arguments) {
-                        stream.push({
-                          type: "toolcall_delta",
-                          contentIndex: state.contentIndex,
-                          delta: state.arguments,
-                          partial: output,
-                        });
-                      }
-                    }
-
-                    // id and name can arrive after the block is open; keep it
-                    // in step, since the finalizer only rewrites `arguments`.
-                    if (state.emittedStart) {
-                      const block = output.content[state.contentIndex] as ToolCall;
-                      block.id = state.id;
-                      block.name = state.name;
-                    }
-
-                    if (tc.function?.arguments) {
-                      const argDelta = tc.function.arguments;
-                      // Accumulate unconditionally, but only emit once the block
-                      // exists. `state.contentIndex` defaults to 0, so a delta
-                      // emitted before `toolcall_start` addressed whatever block
-                      // happens to sit at index 0 — usually a text block.
-                      const alreadyEmitted = state.emittedStart === true;
-                      state.arguments += argDelta;
-                      if (alreadyEmitted) {
-                        stream.push({
-                          type: "toolcall_delta",
-                          contentIndex: state.contentIndex,
-                          delta: argDelta,
-                          partial: output,
-                        });
-                      }
-                    }
-                  }
-                }
-              }
-
-              if (choice.finish_reason) {
-                const upstream = String(choice.finish_reason);
-                const mapped = FINISH_REASON_TO_STOP_REASON[upstream];
-                if (mapped) {
-                  output.stopReason = mapped;
-                } else {
-                  // An unknown reason is still a completed generation; treating
-                  // it as "stop" keeps the output. Passing it through untranslated
-                  // is what produced stopReason values pi silently ignored.
-                  output.stopReason = "stop";
-                  if (process.env.QODER_DEBUG) {
-                    console.error(`[pi-provider-qoder] unmapped finish_reason ${JSON.stringify(upstream)}`);
-                  }
-                }
-              }
-            }
-          } catch (e) {
-            // A single malformed SSE line shouldn't kill the stream — skip it.
-            // But a genuine upstream error (thrown below) must propagate to the
-            // outer catch and surface as stopReason="error", not be swallowed.
-            if (e instanceof SyntaxError) {
-              if (process.env.QODER_DEBUG) {
-                console.error("[pi-provider-qoder] skipping malformed SSE line:", dataStr.slice(0, 200));
-              }
-              continue;
-            }
-            throw e;
-          }
-        }
-        if (streamDone) break;
-      }
-
-      if (thinkingParser) {
-        thinkingParser.finalize();
-      }
-
-      if (thinkingBlockIndex !== -1) {
-        const block = output.content[thinkingBlockIndex] as ThinkingContent;
-        stream.push({
-          type: "thinking_end",
-          contentIndex: thinkingBlockIndex,
-          content: block.thinking,
-          partial: output,
-        });
-      }
-
-      for (const state of toolCallsState) {
-        if (state?.emittedStart && !state.emittedEnd) {
-          state.emittedEnd = true;
-          let args = {};
-          try {
-            args = JSON.parse(state.arguments || "{}");
-          } catch {}
-          const block = output.content[state.contentIndex] as ToolCall;
-          block.arguments = args;
-          stream.push({
-            type: "toolcall_end",
-            contentIndex: state.contentIndex,
-            toolCall: {
-              type: "toolCall",
-              id: state.id,
-              name: state.name,
-              arguments: args,
-            },
-            partial: output,
-          });
         }
       }
 
-      // Guarded on blocks that actually reached the message, not on the state
-      // array being non-empty. Claiming "toolUse" for a message carrying no
-      // tool call is what turned a malformed stream into a silent dead end.
-      if (toolCallsState.some((state) => state?.emittedStart)) {
-        output.stopReason = "toolUse";
-      } else if (output.stopReason === "toolUse") {
-        // Upstream said finish_reason=tool_calls and then never sent a call the
-        // agent could run. Failing loudly beats handing pi a "toolUse" message
-        // with no tool in it, which ends the turn mid-task without an error.
-        throw new Error(
-          "Qoder stream reported finish_reason=tool_calls but sent no usable tool call (no id or name in any delta)",
-        );
-      }
-      // Otherwise keep whatever the upstream finish_reason mapped to; never
-      // overwrite a meaningful "length" with "stop".
-      stream.push({
-        type: "done",
-        reason: output.stopReason as Extract<AssistantMessage["stopReason"], "stop" | "length" | "toolUse">,
-        message: output,
-      });
+      stream.push({ type: "done", reason: translator.finalize(), message: output });
       stream.end();
     } catch (e: unknown) {
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
