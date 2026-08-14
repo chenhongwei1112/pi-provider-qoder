@@ -9,7 +9,7 @@ import type {
 import * as PiAi from "@earendil-works/pi-ai";
 import { getQoderMode, isQoderCNMode } from "./cosy.js";
 import { QoderEventTranslator } from "./events.js";
-import { resolveQoderIdentity } from "./oauth.js";
+import { resolveQoderSigningIdentity } from "./oauth.js";
 import { buildChatRequest } from "./request.js";
 import { splitSSEData } from "./sse.js";
 import { type OpenedQoderStream, openQoderStream } from "./transport.js";
@@ -56,8 +56,9 @@ export function streamQoder(
         );
       }
 
-      // Resolve user details from cached credentials
-      const identity = resolveQoderIdentity(model.provider, providerMode);
+      // Resolve user details from cached credentials. The signing variant: this
+      // is the one path that actually signs a request, so it needs machineID.
+      const identity = resolveQoderSigningIdentity(model.provider, providerMode);
 
       const request = buildChatRequest({ model, context, options, providerMode, identity });
 
