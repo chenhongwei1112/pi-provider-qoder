@@ -5,43 +5,39 @@ import { getCachedModelConfig } from "./models.js";
 import { qoderEncodeBodyToBuffer } from "./qoder-encoding.js";
 import { transformMessagesForQoder, transformTools } from "./transform.js";
 
-function stableHash(prefix: string, ...inputs: string[]): string {
+/** First 16 hex chars of sha256 over a domain prefix plus NUL-separated parts. */
+export function stableID(prefix: string, parts: Iterable<string>): string {
   const hash = crypto.createHash("sha256");
   hash.update(prefix);
-  for (const input of inputs) {
+  for (const part of parts) {
     hash.update("\0");
-    hash.update(input);
+    hash.update(part);
   }
   return hash.digest("hex").slice(0, 16);
 }
 
-function stableChatRecordID(
+/**
+ * Stable id for one chat turn, wire-visible as `request_set_id`/`chat_record_id`.
+ *
+ * The parts are collected in the exact order the id has always hashed them, so
+ * the hex stays byte-identical: model, then each message's role and content
+ * (each skipped when falsy), then the tools JSON whenever `tools` is truthy at
+ * all — an empty array included — then the token cap.
+ */
+export function chatRecordID(
   model: string,
   messages: Array<{ role?: string; content?: unknown }>,
   tools: unknown,
   maxTokens: number,
 ): string {
-  const hash = crypto.createHash("sha256");
-  hash.update("qoder-record");
-  hash.update("\0");
-  hash.update(model);
+  const parts: string[] = [model];
   for (const msg of messages) {
-    if (msg?.role) {
-      hash.update("\0");
-      hash.update(msg.role);
-    }
-    if (msg?.content) {
-      hash.update("\0");
-      hash.update(typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content));
-    }
+    if (msg?.role) parts.push(msg.role);
+    if (msg?.content) parts.push(typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content));
   }
-  if (tools) {
-    hash.update("\0");
-    hash.update(JSON.stringify(tools));
-  }
-  hash.update("\0");
-  hash.update(`mt=${maxTokens}`);
-  return hash.digest("hex").slice(0, 16);
+  if (tools) parts.push(JSON.stringify(tools));
+  parts.push(`mt=${maxTokens}`);
+  return stableID("qoder-record", parts);
 }
 
 export interface QoderChatRequest {
@@ -102,7 +98,7 @@ export function buildChatRequest(args: {
   // Use a stable session id when pi provides one (per agent session) so
   // the Qoder server can maintain prompt cache affinity across consecutive
   // requests. Fall back to a random id only when no sessionId is available.
-  const stablePart = stableHash("qoder-session", identity.userID, qoderModel);
+  const stablePart = stableID("qoder-session", [identity.userID, qoderModel]);
   const sessionID = options?.sessionId ? `${stablePart}-${options.sessionId}` : `${stablePart}-${crypto.randomUUID()}`;
 
   let maxTokens = 32768;
@@ -114,7 +110,7 @@ export function buildChatRequest(args: {
   }
 
   const toolsRaw = context.tools && context.tools.length > 0 ? transformTools(context.tools) : undefined;
-  const recordID = stableChatRecordID(qoderModel, normalizedMessages, toolsRaw, maxTokens);
+  const recordID = chatRecordID(qoderModel, normalizedMessages, toolsRaw, maxTokens);
 
   const reqBody: Record<string, unknown> = {
     request_id: crypto.randomUUID(),
