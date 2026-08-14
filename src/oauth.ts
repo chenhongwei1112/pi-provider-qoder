@@ -116,7 +116,7 @@ export type QoderUserIdentity = Omit<QoderIdentity, "machineID">;
  * `resolveQoderIdentity` so no second read of auth.json happens.
  */
 export function identityFromCredentials(
-  creds: Partial<QoderIdentity> | null | undefined,
+  creds: Partial<QoderUserIdentity> | null | undefined,
   mode: string,
 ): QoderUserIdentity {
   const defaults = qoderIdentityDefaults(mode);
