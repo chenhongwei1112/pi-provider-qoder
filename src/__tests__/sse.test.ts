@@ -53,4 +53,20 @@ describe("splitSSEData", () => {
     const { payloads } = splitSSEData("data:   spaced   \n");
     expect(payloads).toEqual(["spaced"]);
   });
+
+  it("reassembles a payload that was cut across chunks", () => {
+    const first = splitSSEData("data:hel");
+    expect(first.payloads).toEqual([]);
+    expect(first.rest).toBe("data:hel");
+    const second = splitSSEData(`${first.rest}lo\n`);
+    expect(second.payloads).toEqual(["hello"]);
+    expect(second.rest).toBe("");
+  });
+
+  it("keeps leading whitespace of an incomplete tail verbatim in rest", () => {
+    // rest is used to continue the next chunk, so its bytes must be preserved.
+    const { payloads, rest } = splitSSEData("data:one\n   data:two");
+    expect(payloads).toEqual(["one"]);
+    expect(rest).toBe("   data:two");
+  });
 });

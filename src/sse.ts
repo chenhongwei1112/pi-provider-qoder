@@ -13,6 +13,13 @@ export interface SSESplit {
  * `data:` fields (`event:`, comments, blanks) are dropped, and a final line
  * with no terminating newline is returned in `rest` so the caller can prepend
  * the next chunk to it.
+ *
+ * The split is greedy: it consumes every complete `data:` line in the buffer
+ * and does not understand any stream-termination marker. Callers are
+ * therefore responsible for stopping consumption once they reach their own
+ * terminator (here, `[DONE]`), discarding any payloads after it. The inlined
+ * loop this replaces broke at that terminator, so behavioural equivalence
+ * depends on the caller honouring that contract.
  */
 export function splitSSEData(buffer: string): SSESplit {
   const payloads: string[] = [];
