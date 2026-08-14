@@ -148,6 +148,16 @@ describe("splitSSEData equals the pre-optimisation implementation", () => {
       expect(splitSSEData(buffer)).toEqual(legacySplitSSEData(buffer));
     });
   }
+
+  // The differential cases above only kill a stalled cursor by hanging, which is
+  // indistinguishable from an unrelated CI timeout. This pins the advance with a
+  // real assertion: every complete line must be consumed, so whatever is handed
+  // back as rest cannot still contain a newline. Bounded so a stall fails fast.
+  it("consumes every complete line, leaving no newline in rest", () => {
+    for (const { name, buffer } of cases) {
+      expect(splitSSEData(buffer).rest, name).not.toContain("\n");
+    }
+  }, 1000);
 });
 
 describe("splitSSEData threads rest across chunks like the pre-optimisation implementation", () => {

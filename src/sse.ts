@@ -28,8 +28,8 @@ export interface SSESplit {
  * Single pass: a cursor walks the buffer instead of the tail being resliced
  * once per line, which saves one intermediate string per line. That is all it
  * saves — V8's `substring` returns a sliced string in O(1), so the shape this
- * replaces was not quadratic; measured on node 22 the cursor is ~1.2x faster
- * across 3 KB to 850 KB chunks.
+ * replaces was never quadratic, and the win measured out small rather than
+ * asymptotic. Do not cite it as a complexity fix.
  */
 export function splitSSEData(buffer: string): SSESplit {
   const payloads: string[] = [];
