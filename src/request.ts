@@ -101,10 +101,9 @@ export function buildChatRequest(args: {
   const stablePart = stableID("qoder-session", [identity.userID, qoderModel]);
   const sessionID = options?.sessionId ? `${stablePart}-${options.sessionId}` : `${stablePart}-${crypto.randomUUID()}`;
 
-  let maxTokens = 32768;
-  if (maxOutputTokens > 0) {
-    maxTokens = maxOutputTokens;
-  }
+  // maxOutputTokens is `modelConfig.max_output_tokens || 32768`, so it is always
+  // positive; the old `if (maxOutputTokens > 0)` guard could never fail.
+  let maxTokens = maxOutputTokens;
   if (options?.maxTokens && options.maxTokens < maxTokens) {
     maxTokens = options.maxTokens;
   }
