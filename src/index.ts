@@ -1,21 +1,17 @@
 import type { Api, Model, OAuthCredentials } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ProviderConfig } from "@earendil-works/pi-coding-agent";
-import {
-  getQoderBaseUrl,
-  getQoderMode,
-  getQoderUserEmailFallback,
-  isQoderCNMode,
-  toQoderCNFriendlyModel,
-} from "./cosy.js";
+import { getQoderBaseUrl, getQoderMode, isQoderCNMode, toQoderCNFriendlyModel } from "./cosy.js";
 import { getCachedModels, isCacheStale, updateQoderModelsCache } from "./models.js";
 import { staticCnModels, staticModels } from "./models-static.js";
 import {
   autoLoginQoderFromEnvironment,
   getCachedCredentials,
+  identityFromCredentials,
   loginQoder,
   loginQoderCN,
   refreshQoderToken,
   refreshQoderTokenCN,
+  resolveQoderIdentity,
 } from "./oauth.js";
 import { streamQoder } from "./stream.js";
 import { fetchQoderUsage, fetchQoderUsageCN } from "./usage.js";
@@ -71,13 +67,8 @@ async function refreshModelsAtStartup(providerID: string, mode: string): Promise
   const credentials = getCachedCredentials("", providerID);
   if (!credentials?.access) return;
 
-  await updateQoderModelsCache(
-    credentials.access,
-    credentials.userID || "qoder-user",
-    credentials.name || (isQoderCNMode(mode) ? "Qoder CN User" : "Qoder User"),
-    credentials.email || getQoderUserEmailFallback(mode),
-    mode,
-  );
+  const identity = identityFromCredentials(credentials, mode);
+  await updateQoderModelsCache(credentials.access, identity.userID, identity.name, identity.email, mode);
 }
 
 export default async function (pi: ExtensionAPI) {
@@ -106,11 +97,8 @@ export default async function (pi: ExtensionAPI) {
       try {
         const accessToken = await ctx.modelRegistry.getApiKeyForProvider(providerID);
         if (!accessToken || !isCacheStale(mode)) continue;
-        const creds = getCachedCredentials(accessToken, providerID);
-        const userID = creds?.userID || "qoder-user";
-        const name = creds?.name || (isQoderCNMode(mode) ? "Qoder CN User" : "Qoder User");
-        const email = creds?.email || getQoderUserEmailFallback(mode);
-        await updateQoderModelsCache(accessToken, userID, name, email, mode);
+        const identity = resolveQoderIdentity(providerID, mode);
+        await updateQoderModelsCache(accessToken, identity.userID, identity.name, identity.email, mode);
       } catch {
         // Best-effort: fall back to the existing cache / static models.
       }

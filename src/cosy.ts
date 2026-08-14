@@ -179,6 +179,29 @@ export function getQoderUserEmailFallback(mode?: string): string {
   return isQoderCNMode(mode) ? "user@qoder.com.cn" : "user@qoder.com";
 }
 
+/** The identity fields COSY signing needs from a credentials object. */
+export interface QoderIdentity {
+  userID: string;
+  name: string;
+  email: string;
+  machineID: string;
+}
+
+/**
+ * The placeholders used when the auth store has no answer.
+ *
+ * `machineID` is deliberately absent: it falls back to `getMachineId()`, which
+ * touches the filesystem and may write a new id, so it is resolved by the
+ * caller rather than bundled into a plain defaults record.
+ */
+export function qoderIdentityDefaults(mode: string): Omit<QoderIdentity, "machineID"> {
+  return {
+    userID: "qoder-user",
+    name: isQoderCNMode(mode) ? "Qoder CN User" : "Qoder User",
+    email: getQoderUserEmailFallback(mode),
+  };
+}
+
 function rsaEncryptBase64(data: Buffer | string): string {
   const key = {
     key: qoderRSAPublicKey,

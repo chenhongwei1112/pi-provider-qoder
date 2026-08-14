@@ -3,7 +3,14 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { AuthStorage } from "@earendil-works/pi-coding-agent";
-import { getMachineId, getQoderMode, getQoderRefreshURL, isQoderCNMode } from "./cosy.js";
+import {
+  getMachineId,
+  getQoderMode,
+  getQoderRefreshURL,
+  isQoderCNMode,
+  type QoderIdentity,
+  qoderIdentityDefaults,
+} from "./cosy.js";
 import { interactiveLogin } from "./login.js";
 import { updateQoderModelsCache } from "./models.js";
 import { credentialsFromPat, decodePatRefresh, isPatRefresh } from "./pat.js";
@@ -91,6 +98,33 @@ export function getCachedCredentials(_accessToken: string, providerID = "qoder")
     } catch {}
   }
   return null;
+}
+
+/**
+ * Fill an already-loaded credentials object's gaps with the defaults.
+ *
+ * Callers that already hold credentials use this instead of
+ * `resolveQoderIdentity` so no second read of auth.json happens.
+ */
+export function identityFromCredentials(creds: Partial<QoderIdentity> | null | undefined, mode: string): QoderIdentity {
+  const defaults = qoderIdentityDefaults(mode);
+  return {
+    userID: creds?.userID || defaults.userID,
+    name: creds?.name || defaults.name,
+    email: creds?.email || defaults.email,
+    machineID: creds?.machineID || getMachineId(),
+  };
+}
+
+/**
+ * Read the identity from pi's auth store, falling back to placeholders.
+ *
+ * Note: `getCachedCredentials` ignores its accessToken argument, so this does
+ * NOT verify that the identity belongs to the token the caller will sign with.
+ * Behaviour is preserved from the call sites this replaces.
+ */
+export function resolveQoderIdentity(providerID: string, mode: string): QoderIdentity {
+  return identityFromCredentials(getCachedCredentials("", providerID), mode);
 }
 
 async function loginQoderForMode(callbacks: OAuthLoginCallbacks, mode: string): Promise<OAuthCredentials> {

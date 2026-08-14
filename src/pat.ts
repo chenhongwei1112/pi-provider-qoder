@@ -1,12 +1,5 @@
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
-import {
-  getMachineId,
-  getQoderExchangeURL,
-  getQoderMode,
-  getQoderUserEmailFallback,
-  getQoderUserInfoURL,
-  isQoderCNMode,
-} from "./cosy.js";
+import { getMachineId, getQoderExchangeURL, getQoderMode, getQoderUserInfoURL, qoderIdentityDefaults } from "./cosy.js";
 
 const UA = "pi-provider-qoder";
 
@@ -140,14 +133,15 @@ export async function credentialsFromPat(pat: string, mode: string = getQoderMod
   const { jobToken, jobRefreshToken, expiresAt } = await exchangeJobToken(pat, mode);
   const { userID, email, name } = await fetchUserInfo(jobToken, mode);
   const machineID = getMachineId();
+  const defaults = qoderIdentityDefaults(mode);
 
   return {
     refresh: encodePatRefresh(pat, jobRefreshToken, userID, machineID),
     access: jobToken,
     expires: expiresAt - 5 * 60 * 1000, // 5 min buffer
     userID,
-    email: email || getQoderUserEmailFallback(mode),
-    name: name || (isQoderCNMode(mode) ? "Qoder CN User" : "Qoder User"),
+    email: email || defaults.email,
+    name: name || defaults.name,
     machineID,
   } as OAuthCredentials;
 }

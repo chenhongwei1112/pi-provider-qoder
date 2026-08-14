@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { Api, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import { getQoderChatURL, getQoderCNDirectModel, isQoderCNMode } from "./cosy.js";
+import { getQoderChatURL, getQoderCNDirectModel, isQoderCNMode, type QoderIdentity } from "./cosy.js";
 import { getCachedModelConfig } from "./models.js";
 import { qoderEncodeBodyToBuffer } from "./qoder-encoding.js";
 import { transformMessagesForQoder, transformTools } from "./transform.js";
@@ -62,7 +62,7 @@ export function buildChatRequest(args: {
   context: Context;
   options: SimpleStreamOptions | undefined;
   providerMode: string;
-  identity: { userID: string; name: string; email: string; machineID: string };
+  identity: QoderIdentity;
 }): QoderChatRequest {
   const { model, context, options, providerMode, identity } = args;
 

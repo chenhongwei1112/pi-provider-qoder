@@ -7,9 +7,9 @@ import type {
   SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import * as PiAi from "@earendil-works/pi-ai";
-import { getMachineId, getQoderMode, getQoderUserEmailFallback, isQoderCNMode } from "./cosy.js";
+import { getQoderMode, isQoderCNMode } from "./cosy.js";
 import { QoderEventTranslator } from "./events.js";
-import { getCachedCredentials } from "./oauth.js";
+import { resolveQoderIdentity } from "./oauth.js";
 import { buildChatRequest } from "./request.js";
 import { splitSSEData } from "./sse.js";
 import { type OpenedQoderStream, openQoderStream } from "./transport.js";
@@ -57,13 +57,7 @@ export function streamQoder(
       }
 
       // Resolve user details from cached credentials
-      const cachedCreds = getCachedCredentials(accessToken, model.provider);
-      const identity = {
-        userID: cachedCreds?.userID || "qoder-user",
-        name: cachedCreds?.name || (isQoderCNMode(providerMode) ? "Qoder CN User" : "Qoder User"),
-        email: cachedCreds?.email || getQoderUserEmailFallback(providerMode),
-        machineID: cachedCreds?.machineID || getMachineId(),
-      };
+      const identity = resolveQoderIdentity(model.provider, providerMode);
 
       const request = buildChatRequest({ model, context, options, providerMode, identity });
 
