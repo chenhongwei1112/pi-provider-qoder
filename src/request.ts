@@ -101,9 +101,18 @@ export function buildChatRequest(args: {
   const stablePart = stableID("qoder-session", [identity.userID, qoderModel]);
   const sessionID = options?.sessionId ? `${stablePart}-${options.sessionId}` : `${stablePart}-${crypto.randomUUID()}`;
 
-  // maxOutputTokens is `modelConfig.max_output_tokens || 32768`, so it is always
-  // positive; the old `if (maxOutputTokens > 0)` guard could never fail.
-  let maxTokens = maxOutputTokens;
+  // Do not collapse this guard. maxOutputTokens is `modelConfig.max_output_tokens
+  // || 32768`, which only screens out FALSY values -- a negative number is truthy
+  // and passes straight through. modelConfig comes from getCachedModelConfig,
+  // which hands back `data.configs[key]` verbatim from the on-disk cache
+  // (models.ts:60-62), and updateQoderModelsCache persists whatever the server
+  // sent (models.ts:188). So a negative or corrupted value is reachable, and
+  // without this guard it would be sent as `max_tokens` and hashed into
+  // request_set_id as `mt=-1`.
+  let maxTokens = 32768;
+  if (maxOutputTokens > 0) {
+    maxTokens = maxOutputTokens;
+  }
   if (options?.maxTokens && options.maxTokens < maxTokens) {
     maxTokens = options.maxTokens;
   }
