@@ -1,7 +1,11 @@
 # pi-provider-qoder 结构性重构设计
 
 日期:2026-08-14
-状态:待实施
+状态:阶段一已实施(21 commits,`e22bd20..d6a58c8`)
+
+> 本文写于实施前。若某处对接口的描述与源码不符,以源码为准 —— 偏差清单见
+> `docs/superpowers/plans/2026-08-14-qoder-structural-refactor.md` 的「实施后偏差」一节。
+> 与本文直接有关的一处:`QoderModelEntry` 最终留在 `models.ts` 而非 `models-static.ts`(`:68,357`)。
 
 ## 背景
 

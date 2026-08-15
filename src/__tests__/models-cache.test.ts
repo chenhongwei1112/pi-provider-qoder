@@ -1,21 +1,47 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import type * as NodeOs from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getCachedModels, updateQoderModelsCache } from "../models.js";
 
-const CACHE_PATH = join(homedir(), ".pi", "agent", "qoder-models-cache.json");
-let originalCache: string | undefined;
+// `src/models.ts` resolves the cache path from `homedir()`, so the home
+// directory is redirected before any import is evaluated: `vi.hoisted` runs
+// first and `vi.mock` is hoisted with it. HOME/USERPROFILE are set as well so
+// code resolving the home directory natively sees the same directory.
+// This file owns its own temp home, separate from oauth.test.ts, so the two
+// files cannot race each other when vitest runs them in parallel.
+const TEST_HOME = await vi.hoisted(async () => {
+  // Dynamic imports: this callback runs before the static imports above are
+  // initialised, which is the whole point of hoisting it.
+  const { mkdirSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const home = mkdtempSync(join(tmpdir(), "qoder-models-cache-test-"));
+  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  return home;
+});
+
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeOs>();
+  return { ...actual, homedir: () => TEST_HOME };
+});
+
+const CACHE_PATH = join(TEST_HOME, ".pi", "agent", "qoder-models-cache.json");
 
 beforeEach(() => {
-  originalCache = existsSync(CACHE_PATH) ? readFileSync(CACHE_PATH, "utf8") : undefined;
+  // Start from no cache file. It lives in this file's temp home, so there is
+  // nothing real to snapshot or restore.
   rmSync(CACHE_PATH, { force: true });
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  if (originalCache === undefined) rmSync(CACHE_PATH, { force: true });
-  else writeFileSync(CACHE_PATH, originalCache, "utf8");
+});
+
+afterAll(() => {
+  rmSync(TEST_HOME, { recursive: true, force: true });
 });
 
 describe("Qoder model cache", () => {

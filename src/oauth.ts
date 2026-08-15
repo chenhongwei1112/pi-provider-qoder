@@ -3,7 +3,14 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { AuthStorage } from "@earendil-works/pi-coding-agent";
-import { getMachineId, getQoderMode, getQoderRefreshURL, isQoderCNMode } from "./cosy.js";
+import {
+  getMachineId,
+  getQoderMode,
+  getQoderRefreshURL,
+  isQoderCNMode,
+  type QoderIdentity,
+  qoderIdentityDefaults,
+} from "./cosy.js";
 import { interactiveLogin } from "./login.js";
 import { updateQoderModelsCache } from "./models.js";
 import { credentialsFromPat, decodePatRefresh, isPatRefresh } from "./pat.js";
@@ -91,6 +98,59 @@ export function getCachedCredentials(_accessToken: string, providerID = "qoder")
     } catch {}
   }
   return null;
+}
+
+/** The user-facing identity: everything except the machine's own id. */
+export type QoderUserIdentity = Omit<QoderIdentity, "machineID">;
+
+/**
+ * Fill an already-loaded credentials object's gaps with the defaults.
+ *
+ * Pure: no filesystem access, deliberately. `machineID` is excluded because
+ * resolving it goes through `getMachineId`, which may create
+ * `~/.pi/agent/qoder-machine-id` — a side effect no caller that only needs the
+ * user's name/email should trigger. Signing callers use
+ * `resolveQoderSigningIdentity` instead.
+ *
+ * Callers that already hold credentials use this rather than
+ * `resolveQoderIdentity` so no second read of auth.json happens.
+ */
+export function identityFromCredentials(
+  creds: Partial<QoderUserIdentity> | null | undefined,
+  mode: string,
+): QoderUserIdentity {
+  const defaults = qoderIdentityDefaults(mode);
+  return {
+    userID: creds?.userID || defaults.userID,
+    name: creds?.name || defaults.name,
+    email: creds?.email || defaults.email,
+  };
+}
+
+/**
+ * Read the user identity from pi's auth store, falling back to placeholders.
+ *
+ * Note: `getCachedCredentials` ignores its accessToken argument, so this does
+ * NOT verify that the identity belongs to the token the caller will sign with.
+ * Behaviour is preserved from the call sites this replaces.
+ */
+export function resolveQoderIdentity(providerID: string, mode: string): QoderUserIdentity {
+  return identityFromCredentials(getCachedCredentials("", providerID), mode);
+}
+
+/**
+ * The full identity COSY signing needs, machine id included.
+ *
+ * Only for callers that actually sign a request: unlike `resolveQoderIdentity`
+ * this resolves `machineID`, which may write `~/.pi/agent/qoder-machine-id` on
+ * a machine that has no id yet. Reads the credentials exactly once.
+ */
+export function resolveQoderSigningIdentity(providerID: string, mode: string): QoderIdentity {
+  const creds = getCachedCredentials("", providerID);
+  return {
+    ...identityFromCredentials(creds, mode),
+    machineID: creds?.machineID || getMachineId(),
+  };
 }
 
 async function loginQoderForMode(callbacks: OAuthLoginCallbacks, mode: string): Promise<OAuthCredentials> {

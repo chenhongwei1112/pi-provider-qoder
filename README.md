@@ -156,16 +156,45 @@ pi --provider qoder --model auto
 ```text
 src/
 ├── index.ts            # Extension registration
-├── cosy.ts             # COSY signature, machine ID, region/endpoints, CN model aliases
-├── login.ts            # OAuth device flow + PAT login sequence
-├── pat.ts              # PAT → job-token exchange + identity resolution
-├── models.ts           # Model definitions and dynamic config cache
-├── oauth.ts            # PAT / OAuth callback orchestrator
-├── stream.ts           # Main streaming response handler
-├── transform.ts        # Message conversions (OpenAI schema mapping)
+├── stream.ts           # Orchestration only: build -> open -> translate -> emit
+│
+│                       # Streaming pipeline. Split so each part can be reasoned
+│                       # about on its own; the boundaries below are enforced.
+├── request.ts          # Chat request body, stable session and record ids
+├── transport.ts        # HTTP, retries, Retry-After, idle watchdog
+├── sse.ts              # SSE line framing, pure
+├── events.ts           # SSE payloads -> pi events, usage mapping
 ├── thinking-parser.ts  # Fallback <think> tag parser
-└── qoder-encoding.ts   # WAF bypass body encoder
+├── transform.ts        # Message conversions (OpenAI schema mapping)
+├── qoder-encoding.ts   # WAF bypass body encoder
+├── usage.ts            # Token accounting
+│
+│                       # Identity, credentials, signing
+├── cosy.ts             # COSY signature, machine id, endpoints, identity defaults
+├── oauth.ts            # PAT / OAuth orchestrator, identity resolution
+├── login.ts            # OAuth device flow + PAT login sequence
+├── pat.ts              # PAT -> job-token exchange
+│
+│                       # Model catalogue
+├── models.ts           # Dynamic config cache
+└── models-static.ts    # Static model catalogue
 ```
+
+Three boundaries hold mechanically, and each is worth keeping:
+
+- `sse.ts` has **zero imports**. It is byte framing and knows nothing about
+  Qoder, so it needs no harness to test. It is also deliberately greedy and
+  terminator-blind: it returns every complete `data:` line in the buffer, and
+  the caller is responsible for stopping at `[DONE]` and for threading the
+  unconsumed `rest` into the next chunk.
+- `transport.ts` references **no pi types**. It moves bytes and retries; it has
+  no opinion about what they mean.
+- `events.ts` contains **no `fetch`**. SSE-to-event translation is decided
+  entirely by its inputs, so stream semantics are testable without a network.
+
+`stream.ts` owns the terminator and `rest` contract spanning those three, and
+emits both terminal events (`done` and `error`) so that responsibility stays in
+one place.
 
 ## License
 
