@@ -1,15 +1,15 @@
 {
-  "name": "pi-provider-qoder",
+  "name": "omp-provider-qoder",
   "version": "0.3.0",
-  "description": "Pi extension for Qoder AI \u2014 with OAuth authentication, COSY signatures and WAF bypass",
+  "description": "OMP extension for Qoder AI — with OAuth authentication, COSY signatures and WAF bypass",
   "type": "module",
   "license": "MIT",
   "publishConfig": {
     "access": "public"
   },
   "keywords": [
-    "pi-package",
-    "pi",
+    "omp-package",
+    "omp",
     "qoder",
     "ai",
     "provider"
@@ -29,7 +29,7 @@
     "prepare": "npm run build",
     "prepublishOnly": "npm run check && npm run build"
   },
-  "pi": {
+  "omp": {
     "extensions": [
       "./dist/index.js"
     ]
@@ -44,10 +44,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/simonsmh/pi-provider-qoder.git"
+    "url": "git+https://github.com/chenhongwei1112/pi-provider-qoder.git"
   },
   "bugs": {
-    "url": "https://github.com/simonsmh/pi-provider-qoder/issues"
+    "url": "https://github.com/chenhongwei1112/pi-provider-qoder/issues"
   },
-  "homepage": "https://github.com/simonsmh/pi-provider-qoder#readme"
+  "homepage": "https://github.com/chenhongwei1112/pi-provider-qoder#readme"
 }
