@@ -10,6 +10,24 @@
 
 设计依据:`docs/superpowers/specs/2026-08-14-qoder-structural-refactor-design.md`
 
+## 实施后偏差(2026-08-14 完成时补记)
+
+这份 plan 与 spec 是实施**前**写的,下面的记述在实施中被证明不准确或被有意改掉。原文一律保留 ——
+计划与结果的差异本身是信息。**判断接口时以源码为准,不以本文档为准。**
+
+| 本文档写的 | 实际结果 | 原因 |
+|---|---|---|
+| `QoderModelEntry` 移入 `models-static.ts`(`:43,56,68,82`,spec `:68,357`) | 留在 `models.ts:15`,module-private | Task 1 的 review 指出它只被 `models.ts` 用,人类裁定 review 正确。**但那个"唯一消费者"前提后来也被证伪**:whole-branch review 发现它有两个 —— 导出函数 `getCachedModelConfig` 的返回类型,以及 `request.ts:66-75` 手工构造的同形对象;tsc 已验证两者未被类型耦合 |
+| Task 6 的解析函数返回 `QoderIdentity`(`:889-890`) | 返回 `QoderUserIdentity = Omit<QoderIdentity, "machineID">`,并多一个导出 `resolveQoderSigningIdentity` | `index.ts` 的两个消费者只要三字段,让解析函数无条件解析机器身份是类型不诚实;`qoderIdentityDefaults` 本就返回 `Omit<...>`,这只是把该区分贯彻下去 |
+| Task 7 导出 `chatRecordParts` generator | 导出 `chatRecordID` | 让测试调用生产实际调用的函数;generator 形状抓不到调用点用错 domain prefix 的错误 |
+| Task 8 的 `if (maxOutputTokens > 0)` 是死分支 | **它是活的**,误删后已恢复(`826cada`) | `\|\| 32768` 只筛 falsy,负数是 truthy;`modelConfig` 来自磁盘 cache 里逐字持久化的服务端 entry。两个独立 reviewer 分别命中 |
+| 行数表(`:1394-1402`) | cosy 328 / oauth 287 / models 218 / request 172 / stream 131 / sse 46 | — |
+| `stream.ts` 超 120 行说明有该搬的没搬(`:1403`) | 131 行,已裁定接受 | 里面已无死代码,再压 11 行等于为数字搬运编排代码 |
+| 测试 177(`:1460`) | **276** | 计划只算了差分测试。实际另加:跨 chunk 与 UTF-8 边界(补上一个 HIGH 级缺口 —— 全套此前从未分块交付过响应体)、请求体 key 集合与顺序、`max_output_tokens` 钳制、machine-id 回落运算符、单次 auth 读取、SSE 游标推进 |
+
+行为零变化这条约束守住了,唯一的例外是上表第四行 —— 它被 review 抓到并恢复。
+
+
 ## Global Constraints
 
 以下约束适用于每个 Task,不再逐条重复:
