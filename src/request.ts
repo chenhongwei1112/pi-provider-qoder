@@ -79,7 +79,16 @@ export function buildChatRequest(args: {
   const maxOutputTokens = modelConfig.max_output_tokens || 32768;
 
   const normalizedMessages = transformMessagesForQoder(context.messages);
-  const systemText = context.systemPrompt || "";
+  // omp hands `systemPrompt` over as an array of prompt segments, while the
+  // `pi-ai` types omp injects into extensions still declare it as `string`.
+  // Measured as an array under the default prompt, `--system-prompt`, and
+  // `--append-system-prompt`; the string branch stays as a zero-cost guard
+  // because the declared type permits it. Passing the array straight through as
+  // a system message's `content` makes Qoder reject the body with
+  // "set property error, ...MessagesInputDto#content".
+  const systemText = Array.isArray(context.systemPrompt)
+    ? context.systemPrompt.join("\n\n")
+    : context.systemPrompt || "";
 
   let lastUserText = "";
   for (let i = normalizedMessages.length - 1; i >= 0; i--) {
