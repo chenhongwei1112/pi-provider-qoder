@@ -1,6 +1,6 @@
-# pi-provider-qoder
+# omp-provider-qoder
 
-A [pi](https://shittycodingagent.ai/) provider extension that connects pi to the **Qoder API**, exposing Qoder Global and Qoder China models through provider surfaces.
+An [omp](https://github.com/badlogic/pi-mono) provider extension that connects omp to the **Qoder API**, exposing Qoder Global and Qoder China models through provider surfaces. This is an omp-only fork of [`pi-provider-qoder`](https://github.com/simonsmh/pi-provider-qoder) — see [Fork notes](#fork-notes).
 
 ## Features
 
@@ -16,19 +16,20 @@ A [pi](https://shittycodingagent.ai/) provider extension that connects pi to the
 
 ## Quick start
 
-Install the provider:
+Build the extension (`npm ci` runs the build through `prepare`):
 
 ```bash
-pi install npm:pi-provider-qoder
+npm ci
 ```
 
-Or install it globally with npm:
+Point omp at the bundle in `~/.omp/agent/config.yml`:
 
-```bash
-npm install -g pi-provider-qoder
+```yaml
+extensions:
+  - /path/to/omp-provider-qoder/dist/index.js
 ```
 
-Then log in from pi.
+Extensions load at startup, so restart omp afterwards. Then log in.
 
 Global / international edition:
 
@@ -51,14 +52,14 @@ exchanges it for a short-lived job token (mirroring the official `qodercli` /
 Global Qoder:
 
 - Run `/login qoder` and choose **Use API Key (PAT)**, then paste the token.
-- Or set `QODER_PERSONAL_ACCESS_TOKEN` (or `QODER_PAT`) before starting pi.
-- `QODER_API_KEY` is also accepted; when set, pi automatically exchanges it
-  and logs the provider in during startup.
+- Or set `QODER_PERSONAL_ACCESS_TOKEN` (or `QODER_PAT`) before starting omp.
+- `QODER_API_KEY` is also accepted; when set, the provider exchanges it and logs
+  in during startup.
 
 Qoder China:
 
 - Run `/login qoder-cn`, then paste the CN PAT.
-- Or set `QODERCN_PERSONAL_ACCESS_TOKEN` (or `QODERCN_PAT`) before starting pi.
+- Or set `QODERCN_PERSONAL_ACCESS_TOKEN` (or `QODERCN_PAT`) before starting omp.
 - `QODERCN_API_KEY` is also accepted and triggers the same automatic startup login.
 
 > The exchanged job token is short-lived; the provider transparently re-exchanges
@@ -133,22 +134,22 @@ Compatibility aliases are also accepted for request mapping, such as
 
 ## Usage
 
-Once logged in, select any Qoder model in pi:
+Once logged in, select any Qoder model in omp:
 
 ```text
-/model qwen3.7-plus
+/model qoder/auto
 ```
 
 Or start directly:
 
 ```bash
-pi --provider qoder-cn --model qwen3.7-plus
+omp --model qoder/auto
 ```
 
-Global example:
+China example:
 
 ```bash
-pi --provider qoder --model auto
+omp --model qoder-cn/qwen3.7-plus
 ```
 
 ## Architecture
@@ -172,12 +173,14 @@ src/
 │                       # Identity, credentials, signing
 ├── cosy.ts             # COSY signature, machine id, endpoints, identity defaults
 ├── oauth.ts            # PAT / OAuth orchestrator, identity resolution
+├── identity-store.ts   # The identity omp's auth store drops, persisted beside it
 ├── login.ts            # OAuth device flow + PAT login sequence
 ├── pat.ts              # PAT -> job-token exchange
 │
-│                       # Model catalogue
+│                       # Model catalogue and paths
 ├── models.ts           # Dynamic config cache
-└── models-static.ts    # Static model catalogue
+├── models-static.ts    # Static model catalogue
+└── paths.ts            # omp agent directory (honors PI_CODING_AGENT_DIR)
 ```
 
 Three boundaries hold mechanically, and each is worth keeping:
@@ -195,6 +198,51 @@ Three boundaries hold mechanically, and each is worth keeping:
 `stream.ts` owns the terminator and `rest` contract spanning those three, and
 emits both terminal events (`done` and `error`) so that responsibility stays in
 one place.
+
+## Storage layout
+
+Everything this provider persists lives under omp's agent directory — `~/.omp/agent`
+by default, relocated by `PI_CODING_AGENT_DIR` and by `omp --profile <name>`:
+
+| Path | Written by | Contents |
+| --- | --- | --- |
+| `agent.db` | omp | Credential record: `access`, `refresh`, `expires`, `email` |
+| `qoder-identity.json` | this provider | `userID`, `name`, `email`, `machineID` |
+| `qoder-models-cache.json` | this provider | Dynamic model catalogue and effort configs |
+| `qoder-machine-id` | this provider | Fallback machine id, only when the Qoder IDE has none |
+
+The identity file exists because omp's auth store keeps only the
+`OAuthCredentials` fields it knows and drops the `userID`, `name`, and `machineID`
+this provider attaches. COSY signing rejects an empty `userID`, so the identity
+has to survive independently of the credential. `userID` and `machineID` are also
+recoverable from the refresh string — `pat|<pat>|<jobRefresh>|<userID>|<machineID>`
+for PAT credentials, `<refreshToken>|<userID>|<machineID>` for OAuth ones — and
+the file covers `name`, which neither layout carries.
+
+The machine id prefers `~/.qoder/.auth/machine_id`, the Qoder IDE's own copy:
+reusing it keeps this client on the same device fingerprint as the official one.
+
+## Fork notes
+
+Differences from upstream `pi-provider-qoder`, each driven by omp rather than
+preference:
+
+- **`systemPrompt` arrives as an array.** omp hands it over as `string[]` while
+  the `pi-ai` types it injects still declare `string`. Passing the array through
+  as a system message's `content` makes Qoder reject the body with
+  `set property error, ...MessagesInputDto#content`.
+- **No `oauth.modifyModels`.** omp clones the provider config across its worker
+  boundary, so a function member makes that clone throw and omp logs
+  `extension model projection failed; serving unprojected catalog` — the hook is
+  never invoked. `registerProvider` already supplies the correct catalogue.
+- **Credentials come from omp's `AuthStorage`**, not from `~/.pi/agent/auth.json`.
+- **Paths follow `PI_CODING_AGENT_DIR`** instead of resolving under `~/.pi`.
+- **Manifest key is `omp.extensions`**; omp reads `pi.extensions` only as legacy.
+
+Verified end to end against omp: startup registration, catalogue listing
+(`omp models` lists all 16 models), streaming completions, and tool calls. The
+interactive `/login` device-code flow is unchanged from upstream and was not
+re-exercised here.
 
 ## License
 
