@@ -1,12 +1,37 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import type * as NodeOs from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { updateQoderModelsCache } from "../models.js";
 import { autoLoginQoderFromEnvironment, getCachedCredentials, getQoderPatForMode } from "../oauth.js";
 import { credentialsFromPat } from "../pat.js";
 
-const AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
+// The production code resolves `~/.pi/agent/auth.json` at module top level
+// (`src/oauth.ts`), so the home directory has to be redirected before any
+// import is evaluated: `vi.hoisted` runs first, `vi.mock` is hoisted with it.
+// The mock covers every `node:os` importer inside the module graph; setting
+// HOME/USERPROFILE covers code that resolves the home directory natively
+// (e.g. pi's own externalized `AuthStorage`).
+// This file owns its own temp home so it can never race models-cache.test.ts.
+const TEST_HOME = await vi.hoisted(async () => {
+  // Dynamic imports: this callback runs before the static imports above are
+  // initialised, which is the whole point of hoisting it.
+  const { mkdirSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const home = mkdtempSync(join(tmpdir(), "qoder-oauth-test-"));
+  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  return home;
+});
+
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeOs>();
+  return { ...actual, homedir: () => TEST_HOME };
+});
+
+const AUTH_FILE = join(TEST_HOME, ".pi", "agent", "auth.json");
 
 vi.mock("../pat.js", () => ({
   credentialsFromPat: vi.fn().mockResolvedValue({
@@ -29,18 +54,21 @@ vi.mock("../models.js", () => ({
 
 describe("oauth autoLoginQoderFromEnvironment", () => {
   const originalEnv = process.env;
-  let originalAuth: string | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
     process.env = { ...originalEnv };
-    originalAuth = existsSync(AUTH_FILE) ? readFileSync(AUTH_FILE, "utf8") : undefined;
+    // Each test starts from an empty auth store in this file's temp home. No
+    // snapshot/restore of a real credentials file is needed any more.
+    rmSync(AUTH_FILE, { force: true });
   });
 
   afterEach(() => {
     process.env = originalEnv;
-    if (originalAuth === undefined) rmSync(AUTH_FILE, { force: true });
-    else writeFileSync(AUTH_FILE, originalAuth, "utf8");
+  });
+
+  afterAll(() => {
+    rmSync(TEST_HOME, { recursive: true, force: true });
   });
 
   it("extracts PAT correctly from env for global and CN mode", () => {
