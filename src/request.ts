@@ -136,25 +136,35 @@ export function buildChatRequest(args: {
 
   const toolsRaw = context.tools && context.tools.length > 0 ? transformTools(context.tools) : undefined;
   const recordID = chatRecordID(qoderModel, normalizedMessages, toolsRaw, maxTokens);
-  // If a thinking effort is requested and the model supports a thinking_config,
-  // patch model_config's efforts to mark the selected level as is_default.
+  // If a thinking effort is requested or thinking should be disabled, patch
+  // model_config to signal the preference via is_default on the appropriate
+  // slot in thinking_config.
   let effectiveModelConfig: Record<string, unknown> = modelConfig as Record<string, unknown>;
-  if (thinkingEffort && isReasoning) {
+  if (isReasoning) {
     const tc = (modelConfig as Record<string, unknown>).thinking_config;
-    if (tc && typeof tc === "object" && (tc as Record<string, unknown>).enabled !== undefined) {
-      const enabled = (tc as Record<string, unknown>).enabled as Record<string, unknown>;
-      const efforts = enabled.efforts as Record<string, unknown> | undefined;
-      if (efforts && typeof efforts === "object") {
-        const patchedEfforts: Record<string, unknown> = {};
-        for (const key of Object.keys(efforts))
-          patchedEfforts[key] = { ...(efforts[key] as object), is_default: key === thinkingEffort };
+    if (tc && typeof tc === "object") {
+      const wantOff = reasoningVal === false || reasoningVal === "off";
+      if (wantOff && (tc as Record<string, unknown>).disabled !== undefined) {
+        // --thinking off: select disabled mode
         effectiveModelConfig = {
           ...(modelConfig as Record<string, unknown>),
-          thinking_config: {
-            ...tc,
-            enabled: { ...enabled, efforts: patchedEfforts },
-          },
+          thinking_config: { disabled: { is_default: true } },
         };
+      } else if (thinkingEffort && (tc as Record<string, unknown>).enabled !== undefined) {
+        const enabled = (tc as Record<string, unknown>).enabled as Record<string, unknown>;
+        const efforts = enabled.efforts as Record<string, unknown> | undefined;
+        if (efforts && typeof efforts === "object") {
+          const patchedEfforts: Record<string, unknown> = {};
+          for (const key of Object.keys(efforts))
+            patchedEfforts[key] = { ...(efforts[key] as object), is_default: key === thinkingEffort };
+          effectiveModelConfig = {
+            ...(modelConfig as Record<string, unknown>),
+            thinking_config: {
+              ...tc,
+              enabled: { ...enabled, efforts: patchedEfforts },
+            },
+          };
+        }
       }
     }
   }

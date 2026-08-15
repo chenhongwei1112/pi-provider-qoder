@@ -86,6 +86,16 @@ export function getCachedModelConfig(modelKey: string, mode?: string): QoderMode
       source: "system",
     };
   }
+  // Global mode fallback: check static model definitions for reasoning flag
+  const staticEntry = staticModels.find((m) => m.id === modelKey);
+  if (staticEntry) {
+    return {
+      key: modelKey,
+      is_reasoning: staticEntry.reasoning,
+      max_output_tokens: staticEntry.maxTokens,
+      source: "system",
+    };
+  }
 
   return null;
 }
@@ -146,6 +156,7 @@ export async function updateQoderModelsCache(
         Accept: "application/json",
         ...headers,
       },
+      signal: AbortSignal.timeout(15000),
     });
 
     if (!response.ok) {
@@ -209,5 +220,7 @@ export async function updateQoderModelsCache(
     const cachePath = getQoderCachePath(mode);
     mkdirSync(dirname(cachePath), { recursive: true });
     writeFileSync(cachePath, JSON.stringify(cacheData, null, 2), "utf-8");
-  } catch {}
+  } catch (e) {
+    console.error("[pi-provider-qoder] Failed to update model cache:", e);
+  }
 }

@@ -62,5 +62,7 @@ export function saveQoderIdentity(mode: string, identity: Partial<QoderStoredIde
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const merged = { ...loadQoderIdentity(mode), ...updates };
     writeFileSync(path, JSON.stringify(merged, null, 2), { encoding: "utf8", mode: 0o600 });
-  } catch {}
+  } catch (e) {
+    console.error("[pi-provider-qoder] Failed to save identity:", e);
+  }
 }

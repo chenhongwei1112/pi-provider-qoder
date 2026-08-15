@@ -125,7 +125,9 @@ async function fetchUserInfo(jobToken: string, mode: string): Promise<{ userID: 
       email = info.email || "";
       name = info.name || info.username || "";
     }
-  } catch {}
+  } catch (e) {
+    console.error("[pi-provider-qoder] Failed to fetch user info:", e);
+  }
   return { userID, email, name };
 }
 
