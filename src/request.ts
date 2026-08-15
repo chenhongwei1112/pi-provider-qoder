@@ -77,6 +77,14 @@ export function buildChatRequest(args: {
 
   const isReasoning = !!modelConfig.is_reasoning;
   const maxOutputTokens = modelConfig.max_output_tokens || 32768;
+  // Map omp thinking level to qoder server effort string
+  let thinkingEffort: string | undefined;
+  const reasoningVal = options?.reasoning;
+  if (reasoningVal !== false && reasoningVal !== "off" && reasoningVal !== undefined && reasoningVal !== null) {
+    const r = String(reasoningVal);
+    if (r === "minimal") thinkingEffort = "low";
+    else if (["low", "medium", "high", "xhigh", "max"].includes(r)) thinkingEffort = r;
+  }
 
   const normalizedMessages = transformMessagesForQoder(context.messages);
   // omp hands `systemPrompt` over as an array of prompt segments, while the
@@ -128,6 +136,28 @@ export function buildChatRequest(args: {
 
   const toolsRaw = context.tools && context.tools.length > 0 ? transformTools(context.tools) : undefined;
   const recordID = chatRecordID(qoderModel, normalizedMessages, toolsRaw, maxTokens);
+  // If a thinking effort is requested and the model supports a thinking_config,
+  // patch model_config's efforts to mark the selected level as is_default.
+  let effectiveModelConfig: Record<string, unknown> = modelConfig as Record<string, unknown>;
+  if (thinkingEffort && isReasoning) {
+    const tc = (modelConfig as Record<string, unknown>).thinking_config;
+    if (tc && typeof tc === "object" && (tc as Record<string, unknown>).enabled !== undefined) {
+      const enabled = (tc as Record<string, unknown>).enabled as Record<string, unknown>;
+      const efforts = enabled.efforts as Record<string, unknown> | undefined;
+      if (efforts && typeof efforts === "object") {
+        const patchedEfforts: Record<string, unknown> = {};
+        for (const key of Object.keys(efforts))
+          patchedEfforts[key] = { ...(efforts[key] as object), is_default: key === thinkingEffort };
+        effectiveModelConfig = {
+          ...(modelConfig as Record<string, unknown>),
+          thinking_config: {
+            ...tc,
+            enabled: { ...enabled, efforts: patchedEfforts },
+          },
+        };
+      }
+    }
+  }
 
   const reqBody: Record<string, unknown> = {
     request_id: crypto.randomUUID(),
@@ -162,13 +192,14 @@ export function buildChatRequest(args: {
         modelConfig: {
           key: qoderModel,
           is_reasoning: isReasoning,
+          ...(thinkingEffort ? { thinking_effort: thinkingEffort } : {}),
         },
         originalContent: lastUserText,
       },
       features: [],
       text: lastUserText,
     },
-    model_config: modelConfig,
+    model_config: effectiveModelConfig,
     business: {
       product: "cli",
       version: "1.0.0",
