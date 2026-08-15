@@ -58,6 +58,12 @@ function objectField(value: unknown, key: string): unknown {
   }
   return found;
 }
+
+function arrayField(value: unknown, key: string): unknown[] {
+  const found = field(value, key);
+  if (!Array.isArray(found)) throw new Error(`${key} is not an array`);
+  return found;
+}
 // --- end of copied decoder -------------------------------------------------
 
 const identity = { userID: "user-1", name: "Qoder User", email: "u@example.com", machineID: "machine-1" };
@@ -145,14 +151,11 @@ describe("buildChatRequest pins the wire shape of the request body", () => {
     mockedGetCachedModelConfig.mockReset();
   });
 
-  /** A model config with a known key list, so model_config can be pinned too. */
-  function buildBody(ctx: Context = context): unknown {
-    mockedGetCachedModelConfig.mockReturnValue({
-      key: "ultimate",
-      is_reasoning: true,
-      max_output_tokens: 32768,
-      source: "system",
-    });
+  /**
+   * Decodes the body of one buildChatRequest call. The getCachedModelConfig mock
+   * must already be installed: the cache-miss tests below install their own.
+   */
+  function decodeBuiltBody(ctx: Context = context): unknown {
     return decodeQoderBody(
       buildChatRequest({
         model,
@@ -162,6 +165,17 @@ describe("buildChatRequest pins the wire shape of the request body", () => {
         identity,
       }).encodedBytes,
     );
+  }
+
+  /** A model config with a known key list, so model_config can be pinned too. */
+  function buildBody(ctx: Context = context): unknown {
+    mockedGetCachedModelConfig.mockReturnValue({
+      key: "ultimate",
+      is_reasoning: true,
+      max_output_tokens: 32768,
+      source: "system",
+    });
+    return decodeBuiltBody(ctx);
   }
 
   it("sends exactly these top-level keys, in this order", () => {
@@ -244,5 +258,69 @@ describe("buildChatRequest pins the wire shape of the request body", () => {
     // The system prompt changes body.messages but must not add or move a key.
     const withSystem = { ...(context as object), systemPrompt: "a system prompt" } as unknown as Context;
     expect(Object.keys(buildBody(withSystem) as object)).toEqual(Object.keys(buildBody() as object));
+  });
+
+  // --- the non-empty tools branch -------------------------------------------
+  // Every fixture above sends `tools: []`, so the element shape transformTools
+  // produces has never reached the wire in a test. transform.test.ts pins those
+  // elements with toEqual, and toEqual does not compare key order, so nothing
+  // guarded the order of these signed bytes.
+  const contextWithTools = {
+    systemPrompt: "",
+    messages: [{ role: "user", content: "hi" }],
+    tools: [
+      {
+        name: "read_file",
+        description: "Read a file",
+        parameters: { type: "object", properties: { path: { type: "string" } } },
+      },
+    ],
+  } as unknown as Context;
+
+  it("sends exactly these tools element keys, in this order", () => {
+    const tools = arrayField(buildBody(contextWithTools), "tools");
+    expect(tools).toHaveLength(1);
+    expect(Object.keys(objectField(tools, "0") as object)).toEqual(["type", "function"]);
+  });
+
+  it("sends exactly these tools element function keys, in this order", () => {
+    const tool = objectField(arrayField(buildBody(contextWithTools), "tools"), "0");
+    expect(Object.keys(objectField(tool, "function") as object)).toEqual(["name", "description", "parameters"]);
+  });
+
+  it("keeps the top-level shape when tools are present", () => {
+    // `tools` is written unconditionally as `toolsRaw || []`, so a non-empty tools
+    // array must not add a key either. The length assertion keeps this test from
+    // quietly falling back to the empty branch it exists to leave.
+    const body = buildBody(contextWithTools);
+    expect(arrayField(body, "tools")).toHaveLength(1);
+    expect(Object.keys(body as object)).toEqual(Object.keys(buildBody() as object));
+  });
+
+  // --- the cache-miss branch ------------------------------------------------
+  it("sends the fallback model config as model_config, key first, on a cache miss", () => {
+    // getCachedModelConfig returns null for a model with no cache entry, which is
+    // the first-request path. model_config is then buildChatRequest's own literal,
+    // not the cached object, and that literal's key order is signed as well.
+    mockedGetCachedModelConfig.mockReturnValue(null);
+    expect(Object.keys(objectField(decodeBuiltBody(), "model_config") as object)).toEqual([
+      "key",
+      "is_reasoning",
+      "max_output_tokens",
+      "source",
+    ]);
+  });
+
+  it("appends key to the end when the cached config does not have one", () => {
+    // `modelConfig.key = qoderModel` assigns onto the cached object, and JS puts a
+    // key that was not already present at the end. This pins the shape that goes
+    // out today, which is key-last -- the same wire shape a reordering bug makes.
+    mockedGetCachedModelConfig.mockReturnValue({ is_reasoning: true, max_output_tokens: 32768, source: "system" });
+    expect(Object.keys(objectField(decodeBuiltBody(), "model_config") as object)).toEqual([
+      "is_reasoning",
+      "max_output_tokens",
+      "source",
+      "key",
+    ]);
   });
 });
