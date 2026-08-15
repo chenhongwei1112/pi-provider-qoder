@@ -82,6 +82,90 @@ function mockFetch(body: string): typeof fetch {
   return vi.fn(async () => response) as unknown as typeof fetch;
 }
 
+/**
+ * Byte offset at which `parts[index]` starts inside the UTF-8 encoding of their
+ * concatenation.
+ */
+function byteStart(parts: string[], index: number): number {
+  return new TextEncoder().encode(parts.slice(0, index).join("")).length;
+}
+
+/** Byte offset of `needle`'s first occurrence inside `body`'s UTF-8 encoding. */
+function byteOffsetOf(body: string, needle: string): number {
+  const at = body.indexOf(needle);
+  if (at < 0) throw new Error(`byteOffsetOf: ${needle} is not in the body`);
+  return new TextEncoder().encode(body.slice(0, at)).length;
+}
+
+interface ChunkedFetch {
+  fetch: typeof fetch;
+  /** How many chunks the consumer actually pulled. */
+  pulled: () => number;
+}
+
+/**
+ * A `fetch` mock that delivers the body in several chunks, cut at exact byte
+ * offsets into its UTF-8 encoding.
+ *
+ * `mockFetch` builds `new Response(<complete string>)`, which undici hands over
+ * in a single read, so the read loop in `stream.ts` runs exactly once and three
+ * of its obligations are never exercised: threading `splitSSEData`'s `rest`
+ * (`stream.ts:103`), streaming UTF-8 decoding (`stream.ts:101`), and re-arming
+ * the idle watchdog per chunk (`stream.ts:98`).
+ *
+ * `cuts` are *byte* offsets, not character offsets, precisely so a cut can land
+ * inside a multi-byte sequence — the split a `TextDecoder` without
+ * `{ stream: true }` turns into replacement characters.
+ *
+ * `gapMs` delays every chunk after the first, so idle-timeout behaviour is
+ * reachable under fake timers. The mock honours `signal` the way real fetch
+ * does: an abort errors the body instead of being silently ignored, which is
+ * what makes the watchdog observable at all.
+ */
+function chunkedFetch(body: string, cuts: number[], gapMs = 0): ChunkedFetch {
+  const bytes = new TextEncoder().encode(body);
+  const bounds = [0, ...cuts, bytes.length];
+  const chunks = bounds.slice(1).map((end, i) => bytes.subarray(bounds[i], end));
+  let delivered = 0;
+
+  const fetchMock = vi.fn(async (_url: unknown, init?: { signal?: AbortSignal }) => {
+    const signal = init?.signal;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        signal?.addEventListener(
+          "abort",
+          () => {
+            controller.error(signal.reason ?? new Error("aborted"));
+          },
+          { once: true },
+        );
+      },
+      async pull(controller) {
+        const next = chunks[delivered];
+        if (!next) {
+          controller.close();
+          return;
+        }
+        if (delivered > 0 && gapMs > 0) {
+          // Driven by vitest's fake clock, never the wall clock: the caller
+          // advances time, so a 200s gap costs no real milliseconds.
+          // Executor form because the project targets ES2022 / Node 20, which
+          // has no `Promise.withResolvers`.
+          await new Promise((resolve) => setTimeout(resolve, gapMs));
+          // The watchdog may have aborted us while we waited; the stream is
+          // already errored, and enqueueing onto it would throw.
+          if (signal?.aborted) return;
+        }
+        delivered++;
+        controller.enqueue(next);
+      },
+    });
+    return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+  });
+
+  return { fetch: fetchMock as unknown as typeof fetch, pulled: () => delivered };
+}
+
 function makeModel(): Model<Api> {
   return { id: "ultimate", api: "qoder-api" as Api, provider: "qoder" } as Model<Api>;
 }
@@ -547,5 +631,124 @@ describe("streamQoder", () => {
     expect(throttled).toHaveBeenCalledTimes(1);
     const err = events.find((e) => e.type === "error");
     expect((err as { error: AssistantMessage }).error.errorMessage).toMatch(/429/);
+  });
+
+  it("reassembles envelopes that are cut in half at a chunk boundary", async () => {
+    // Every other test in this file delivers the whole body in one read, so
+    // `buffer = rest` (`stream.ts:103`) is never load-bearing: mutating it to
+    // `buffer = ""` leaves the suite green. `sse.test.ts` does not cover it
+    // either — it threads `rest` itself, reimplementing the caller's obligation
+    // instead of exercising it, and `sse.ts:17-22` says behavioural equivalence
+    // depends on the caller honouring the contract.
+    const parts = [
+      sseEnvelope(chunk({ content: "Hello ", role: "assistant" })),
+      sseEnvelope(chunk({ content: "cross-chunk", role: "assistant" })),
+      sseEnvelope(chunk({ content: " world", role: "assistant" })),
+      sseEnvelope(finishChunk("stop")),
+      DONE_SSE,
+    ];
+    const cuts = [
+      // Inside the literal `data:` token, so the second half's first line does
+      // not even look like an SSE field on its own.
+      byteStart(parts, 1) + 3,
+      // Mid-JSON, so each half is unparseable alone.
+      byteStart(parts, 2) + Math.floor(parts[2].length / 2),
+      // Between the two newlines that terminate an envelope.
+      byteStart(parts, 4) - 1,
+      // Inside the [DONE] envelope: even the terminator has to be reassembled.
+      byteStart(parts, 4) + 6,
+    ];
+    const server = chunkedFetch(parts.join(""), cuts);
+    globalThis.fetch = server.fetch;
+
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    expect(server.pulled(), "the body must really have arrived in more than one chunk").toBe(cuts.length + 1);
+    expect(events.find((e) => e.type === "error")).toBeUndefined();
+    const done = events.find((e) => e.type === "done");
+    expect(done, "expected the turn to finish on the reassembled [DONE]").toBeDefined();
+    const msg = done && "message" in done ? done.message : undefined;
+    expect(msg?.stopReason).toBe("stop");
+    const text = msg?.content.find((c) => c.type === "text");
+    // Dropping `rest` loses the two deltas whose envelopes straddle a cut.
+    expect(text && "text" in text ? text.text : "").toBe("Hello cross-chunk world");
+  });
+
+  it("decodes a UTF-8 sequence that straddles a chunk boundary", async () => {
+    // This provider streams Chinese, so a 3-byte character split across two
+    // TCP reads is routine. Without `{ stream: true }` (`stream.ts:101`) each
+    // half decodes to U+FFFD and the text silently arrives corrupted — the
+    // envelope still parses, so nothing errors and nobody notices.
+    const parts = [
+      sseEnvelope(chunk({ content: "中文", role: "assistant" })),
+      sseEnvelope(chunk({ content: "流式输出", role: "assistant" })),
+      sseEnvelope(finishChunk("stop")),
+      DONE_SSE,
+    ];
+    const body = parts.join("");
+    const cuts = [
+      // After byte 1 of 3 of 文 (0xE6 | 0x96 0x87).
+      byteOffsetOf(body, "文") + 1,
+      // After byte 2 of 3 of 输, so both split points of a 3-byte sequence are
+      // covered.
+      byteOffsetOf(body, "输") + 2,
+    ];
+    const server = chunkedFetch(body, cuts);
+    globalThis.fetch = server.fetch;
+
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    expect(server.pulled(), "the body must really have arrived in more than one chunk").toBe(cuts.length + 1);
+    expect(events.find((e) => e.type === "error")).toBeUndefined();
+    const done = events.find((e) => e.type === "done");
+    expect(done, "expected the turn to finish on [DONE]").toBeDefined();
+    const msg = done && "message" in done ? done.message : undefined;
+    const text = msg?.content.find((c) => c.type === "text");
+    const decoded = text && "text" in text ? text.text : "";
+    expect(decoded).toBe("中文流式输出");
+    expect(decoded, "a split sequence must not become a replacement character").not.toMatch(/\uFFFD/);
+  });
+
+  it("re-arms the idle watchdog per chunk, so a slow but healthy stream is not aborted", async () => {
+    // `openQoderStream` arms the 300s idle watchdog once, before returning; from
+    // then on only `armIdleWatchdog()` (`stream.ts:98`) keeps it in front of the
+    // stream. Delete that call and a *healthy* stream still dies 300s after the
+    // first chunk. Two 200s gaps straddle that ceiling: each one is well inside
+    // it, their sum is not.
+    const gapMs = 200_000;
+    const parts = [
+      sseEnvelope(chunk({ content: "slow ", role: "assistant" })),
+      sseEnvelope(chunk({ content: "but", role: "assistant" })),
+      sseEnvelope(chunk({ content: " healthy", role: "assistant" })),
+      sseEnvelope(finishChunk("stop")),
+      DONE_SSE,
+    ];
+    const cuts = [byteStart(parts, 1) + 4, byteStart(parts, 3) + 5];
+    const server = chunkedFetch(parts.join(""), cuts, gapMs);
+    globalThis.fetch = server.fetch;
+
+    vi.useFakeTimers();
+    let events: AssistantMessageEvent[];
+    try {
+      const consumed = consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+      await vi.advanceTimersByTimeAsync(gapMs);
+      await vi.advanceTimersByTimeAsync(gapMs);
+      events = await consumed;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(server.pulled(), "the body must really have arrived in more than one chunk").toBe(cuts.length + 1);
+    const err = events.find((e) => e.type === "error");
+    expect(
+      err && "error" in err ? err.error.errorMessage : undefined,
+      "a missing re-arm aborts a healthy stream",
+    ).toBeUndefined();
+    const done = events.find((e) => e.type === "done");
+    expect(done, "expected the slow stream to finish normally").toBeDefined();
+    const msg = done && "message" in done ? done.message : undefined;
+    expect(msg?.stopReason).toBe("stop");
+    const text = msg?.content.find((c) => c.type === "text");
+    expect(text && "text" in text ? text.text : "").toBe("slow but healthy");
   });
 });
