@@ -145,10 +145,13 @@ export function buildChatRequest(args: {
     if (tc && typeof tc === "object") {
       const wantOff = reasoningVal === false || reasoningVal === "off";
       if (wantOff && (tc as Record<string, unknown>).disabled !== undefined) {
-        // --thinking off: select disabled mode
+        // --thinking off: preserve both blocks, signal disabled via is_default
         effectiveModelConfig = {
           ...(modelConfig as Record<string, unknown>),
-          thinking_config: { disabled: { is_default: true } },
+          thinking_config: {
+            disabled: { ...((tc as Record<string, unknown>).disabled as object), is_default: true },
+            enabled: { ...((tc as Record<string, unknown>).enabled as object), is_default: false },
+          },
         };
       } else if (thinkingEffort && (tc as Record<string, unknown>).enabled !== undefined) {
         const enabled = (tc as Record<string, unknown>).enabled as Record<string, unknown>;
