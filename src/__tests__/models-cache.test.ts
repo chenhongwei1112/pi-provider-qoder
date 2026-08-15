@@ -17,9 +17,12 @@ const TEST_HOME = await vi.hoisted(async () => {
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const home = mkdtempSync(join(tmpdir(), "qoder-models-cache-test-"));
-  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  mkdirSync(join(home, ".omp", "agent"), { recursive: true });
   process.env.HOME = home;
   process.env.USERPROFILE = home;
+  // `agentPath` honors PI_CODING_AGENT_DIR; a value inherited from the
+  // developer's shell would send the cache outside this temp home.
+  delete process.env.PI_CODING_AGENT_DIR;
   return home;
 });
 
@@ -28,7 +31,7 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: () => TEST_HOME };
 });
 
-const CACHE_PATH = join(TEST_HOME, ".pi", "agent", "qoder-models-cache.json");
+const CACHE_PATH = join(TEST_HOME, ".omp", "agent", "qoder-models-cache.json");
 
 beforeEach(() => {
   // Start from no cache file. It lives in this file's temp home, so there is

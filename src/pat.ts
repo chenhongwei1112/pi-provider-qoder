@@ -1,7 +1,12 @@
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
-import { getMachineId, getQoderExchangeURL, getQoderMode, getQoderUserInfoURL, qoderIdentityDefaults } from "./cosy.js";
-
-const UA = "pi-provider-qoder";
+import {
+  getMachineId,
+  getQoderExchangeURL,
+  getQoderMode,
+  getQoderUserInfoURL,
+  ProviderUserAgent,
+  qoderIdentityDefaults,
+} from "./cosy.js";
 
 /**
  * Marker prefix used in the credential `refresh` field to identify PAT-based
@@ -55,7 +60,7 @@ export async function exchangeJobToken(pat: string, mode: string = getQoderMode(
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
-      "User-Agent": UA,
+      "User-Agent": ProviderUserAgent,
       "Cosy-Version": "1.0.1",
       "Cosy-ClientType": "5",
     },
@@ -104,7 +109,7 @@ async function fetchUserInfo(jobToken: string, mode: string): Promise<{ userID: 
       headers: {
         Authorization: `Bearer ${jobToken}`,
         Accept: "application/json",
-        "User-Agent": UA,
+        "User-Agent": ProviderUserAgent,
         "Cosy-Version": "1.0.1",
         "Cosy-ClientType": "5",
       },

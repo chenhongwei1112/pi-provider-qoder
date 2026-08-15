@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
-import { getMachineId, getQoderMode, isQoderCNMode } from "./cosy.js";
+import { getMachineId, getQoderMode, isQoderCNMode, ProviderUserAgent } from "./cosy.js";
 import { credentialsFromPat } from "./pat.js";
 
 type PromptFn = (p: { message: string; placeholder?: string; allowEmpty?: boolean }) => Promise<string>;
@@ -137,7 +137,7 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
         method: "GET",
         headers: {
           Accept: "application/json",
-          "User-Agent": "pi-provider-qoder",
+          "User-Agent": ProviderUserAgent,
         },
         signal: getSignal(callbacks),
       });
@@ -176,7 +176,7 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
           headers: {
             Authorization: `Bearer ${tokenData.token}`,
             Accept: "application/json",
-            "User-Agent": "pi-provider-qoder",
+            "User-Agent": ProviderUserAgent,
           },
         });
         if (userinfoRes.ok) {

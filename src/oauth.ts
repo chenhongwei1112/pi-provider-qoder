@@ -1,6 +1,3 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { AuthStorage } from "@earendil-works/pi-coding-agent";
 import {
@@ -8,9 +5,11 @@ import {
   getQoderMode,
   getQoderRefreshURL,
   isQoderCNMode,
+  ProviderUserAgent,
   type QoderIdentity,
   qoderIdentityDefaults,
 } from "./cosy.js";
+import { loadQoderIdentity, saveQoderIdentity } from "./identity-store.js";
 import { interactiveLogin } from "./login.js";
 import { updateQoderModelsCache } from "./models.js";
 import { credentialsFromPat, decodePatRefresh, isPatRefresh } from "./pat.js";
@@ -22,33 +21,12 @@ export interface QoderCredentials extends OAuthCredentials {
   machineID: string;
 }
 
-const AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
-
 /** Return the PAT exposed through the environment for a provider mode. */
 export function getQoderPatForMode(mode: string): string {
   if (isQoderCNMode(mode)) {
     return process.env.QODERCN_API_KEY || process.env.QODERCN_PERSONAL_ACCESS_TOKEN || process.env.QODERCN_PAT || "";
   }
   return process.env.QODER_API_KEY || process.env.QODER_PERSONAL_ACCESS_TOKEN || process.env.QODER_PAT || "";
-}
-
-function saveCredentialsToAuthFile(providerID: string, credentials: OAuthCredentials): void {
-  try {
-    const dir = dirname(AUTH_FILE);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-    }
-    let auth: Record<string, unknown> = {};
-    if (existsSync(AUTH_FILE)) {
-      try {
-        auth = JSON.parse(readFileSync(AUTH_FILE, "utf-8"));
-      } catch {}
-    }
-    auth[providerID] = { type: "oauth", ...credentials };
-    writeFileSync(AUTH_FILE, JSON.stringify(auth, null, 2), { encoding: "utf-8", mode: 0o600 });
-  } catch (err) {
-    console.error(`[pi-provider-qoder] Failed to write auth storage for ${providerID}:`, err);
-  }
 }
 
 /** Exchange an environment PAT before pi resolves its initial model. */
@@ -62,42 +40,63 @@ export async function autoLoginQoderFromEnvironment(providerID: string, mode: st
   // account's credentials.
   const credentials = await credentialsFromPat(pat, mode);
 
-  if (typeof AuthStorage !== "undefined" && typeof AuthStorage?.create === "function") {
-    try {
-      const authStorage = AuthStorage.create();
-      authStorage.set(providerID, { type: "oauth", ...credentials });
-    } catch {
-      saveCredentialsToAuthFile(providerID, credentials);
-    }
-  } else {
-    saveCredentialsToAuthFile(providerID, credentials);
-  }
+  AuthStorage.create().set(providerID, { type: "oauth", ...credentials });
 
   const qCreds = credentials as QoderCredentials;
+  // omp's auth store keeps only the OAuthCredentials fields it knows, so the
+  // identity has to be persisted beside it.
+  saveQoderIdentity(mode, qCreds);
   // Wait for the model cache before the provider is registered. This matters
-  // for `pi --list-models`, which can exit before background work completes.
+  // for `omp models`, which can exit before background work completes.
   await updateQoderModelsCache(qCreds.access, qCreds.userID, qCreds.name, qCreds.email, mode);
 }
 
 /**
- * Read the Qoder identity (userID/email/name/machineID) from pi's own auth
- * store. pi persists the full OAuthCredentials there on login/refresh and keeps
- * it up to date, so there is no need to maintain a separate credentials cache.
+ * The identity carried inside a refresh string.
  *
- * Note: the auth.json path/shape is a pi internal convention, not a public API.
- * This is best-effort and falls back to null so callers can use placeholders.
+ * PAT credentials use `pat|<pat>|<jobRefresh>|<userID>|<machineID>`; OAuth ones
+ * use `<refreshToken>|<userID>|<machineID>`. Either layout keeps the identity
+ * that omp strips from the credential record itself, so both have to be read.
  */
-export function getCachedCredentials(_accessToken: string, providerID = "qoder"): QoderCredentials | null {
-  if (existsSync(AUTH_FILE)) {
-    try {
-      const auth = JSON.parse(readFileSync(AUTH_FILE, "utf-8"));
-      const creds = auth?.[providerID] || (providerID === "qoder" ? auth?.qoder : null);
-      if (creds?.userID || creds?.access) {
-        return creds as QoderCredentials;
-      }
-    } catch {}
+function identityFromRefresh(refresh: string | undefined): { userID: string; machineID: string } {
+  if (!refresh) return { userID: "", machineID: "" };
+  if (isPatRefresh(refresh)) {
+    const { userID, machineID } = decodePatRefresh(refresh);
+    return { userID, machineID };
   }
-  return null;
+  const parts = refresh.split("|");
+  return { userID: parts[1] || "", machineID: parts[2] || "" };
+}
+
+/**
+ * The stored Qoder credential, with the identity omp's auth store drops filled
+ * back in.
+ *
+ * omp persists only `access`/`refresh`/`expires`/`email`, dropping the `userID`,
+ * `name`, and `machineID` this provider attaches. `userID` and `machineID` come
+ * back from the refresh string; `name` only exists in the identity file written
+ * at login. Returns null when nothing is stored, letting callers fall through to
+ * placeholders.
+ */
+export function getCachedCredentials(providerID: string, mode: string): QoderCredentials | null {
+  let stored: Partial<QoderCredentials> | undefined;
+  try {
+    stored = AuthStorage.create().get(providerID) as Partial<QoderCredentials> | undefined;
+  } catch {
+    return null;
+  }
+  if (!stored?.access) return null;
+
+  const saved = loadQoderIdentity(mode);
+  const embedded = identityFromRefresh(stored.refresh);
+
+  return {
+    ...stored,
+    userID: stored.userID || embedded.userID || saved?.userID || "",
+    name: stored.name || saved?.name || "",
+    email: stored.email || saved?.email || "",
+    machineID: stored.machineID || embedded.machineID || saved?.machineID || "",
+  } as QoderCredentials;
 }
 
 /** The user-facing identity: everything except the machine's own id. */
@@ -127,26 +126,20 @@ export function identityFromCredentials(
   };
 }
 
-/**
- * Read the user identity from pi's auth store, falling back to placeholders.
- *
- * Note: `getCachedCredentials` ignores its accessToken argument, so this does
- * NOT verify that the identity belongs to the token the caller will sign with.
- * Behaviour is preserved from the call sites this replaces.
- */
+/** The user identity behind the stored credential, falling back to placeholders. */
 export function resolveQoderIdentity(providerID: string, mode: string): QoderUserIdentity {
-  return identityFromCredentials(getCachedCredentials("", providerID), mode);
+  return identityFromCredentials(getCachedCredentials(providerID, mode), mode);
 }
 
 /**
  * The full identity COSY signing needs, machine id included.
  *
  * Only for callers that actually sign a request: unlike `resolveQoderIdentity`
- * this resolves `machineID`, which may write `~/.pi/agent/qoder-machine-id` on
- * a machine that has no id yet. Reads the credentials exactly once.
+ * this resolves `machineID`, which may write `qoder-machine-id` into omp's agent
+ * directory on a machine that has no id yet. Reads the credentials exactly once.
  */
 export function resolveQoderSigningIdentity(providerID: string, mode: string): QoderIdentity {
-  const creds = getCachedCredentials("", providerID);
+  const creds = getCachedCredentials(providerID, mode);
   return {
     ...identityFromCredentials(creds, mode),
     machineID: creds?.machineID || getMachineId(),
@@ -162,8 +155,7 @@ async function loginQoderForMode(callbacks: OAuthLoginCallbacks, mode: string): 
     try {
       const creds = await credentialsFromPat(pat, mode);
       const qCreds = creds as QoderCredentials;
-      // pi persists these credentials in auth.json itself; no separate cache needed.
-      // Cache models in background
+      saveQoderIdentity(mode, qCreds);
       updateQoderModelsCache(qCreds.access, qCreds.userID, qCreds.name, qCreds.email, mode).catch(() => {});
       return creds;
     } catch {
@@ -174,9 +166,9 @@ async function loginQoderForMode(callbacks: OAuthLoginCallbacks, mode: string): 
   // 2. Interactive login (CN only supports PAT prompt here; global supports device flow fallback)
   const creds = await interactiveLogin(callbacks, mode);
 
-  // Cache models in background. pi persists the credentials in auth.json itself.
   try {
     const qCreds = creds as QoderCredentials;
+    saveQoderIdentity(mode, qCreds);
     updateQoderModelsCache(qCreds.access, qCreds.userID, qCreds.name, qCreds.email, mode).catch(() => {});
   } catch {}
 
@@ -207,6 +199,7 @@ async function refreshQoderTokenForMode(credentials: OAuthCredentials, mode: str
       try {
         const refreshed = await credentialsFromPat(pat, mode);
         const qCreds = refreshed as QoderCredentials;
+        saveQoderIdentity(mode, qCreds);
         updateQoderModelsCache(qCreds.access, qCreds.userID, qCreds.name, qCreds.email, mode).catch(() => {});
         return refreshed;
       } catch {
@@ -221,11 +214,14 @@ async function refreshQoderTokenForMode(credentials: OAuthCredentials, mode: str
 
   const parts = credentials.refresh.split("|");
   const refreshToken = parts[0] || "";
-  const userID = parts[1] || "";
-  const machineID = parts[2] || getMachineId();
   const prev = credentials as Partial<QoderCredentials>;
-  const prevName = prev.name || "";
-  const prevEmail = prev.email || "";
+  const saved = loadQoderIdentity(mode);
+  // omp strips these from the credential it persists, so the refresh string's
+  // tail and the identity file are the only ways back to them.
+  const userID = parts[1] || prev.userID || saved?.userID || "";
+  const machineID = parts[2] || prev.machineID || saved?.machineID || getMachineId();
+  const prevName = prev.name || saved?.name || "";
+  const prevEmail = prev.email || saved?.email || "";
 
   const refreshURL = getQoderRefreshURL(mode);
   try {
@@ -235,7 +231,7 @@ async function refreshQoderTokenForMode(credentials: OAuthCredentials, mode: str
         "Content-Type": "application/json",
         Authorization: `Bearer ${credentials.access}`,
         Accept: "application/json",
-        "User-Agent": "pi-provider-qoder",
+        "User-Agent": ProviderUserAgent,
       },
       body: JSON.stringify({ refreshToken }),
     });
@@ -270,8 +266,9 @@ async function refreshQoderTokenForMode(credentials: OAuthCredentials, mode: str
         machineID,
       };
 
-      // pi persists the refreshed credentials in auth.json itself.
-      // Cache models in background
+      // omp strips userID/name/machineID from the credential it persists, so the
+      // identity is written alongside it here too.
+      saveQoderIdentity(mode, refreshed);
       updateQoderModelsCache(newAccess, userID, prevName, prevEmail, mode).catch(() => {});
 
       return refreshed;

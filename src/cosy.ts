@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { agentPath } from "./paths.js";
 
 const qoderRSAPublicKey = `-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
@@ -16,6 +17,14 @@ const QoderIDEVersion = "1.1.3";
 const QoderClientType = "5";
 const QoderDataPolicy = "disagree";
 const QoderLoginVersion = "v2";
+
+/**
+ * `User-Agent` for this provider's own auxiliary requests: device-code login,
+ * PAT exchange, token refresh, and usage lookups. Qoder does not validate it —
+ * the signed COSY headers carry the real client identity — so it exists to
+ * identify us in server logs, not to impersonate the official client.
+ */
+export const ProviderUserAgent = "omp-provider-qoder";
 const QoderMachineOS =
   process.platform === "win32"
     ? process.arch === "arm64"
@@ -224,7 +233,10 @@ function computeSigPath(urlStr: string): string {
 }
 
 export function getMachineId(): string {
-  const paths = [join(homedir(), ".qoder", ".auth", "machine_id"), join(homedir(), ".pi", "agent", "qoder-machine-id")];
+  // The Qoder IDE's own machine id comes first: reusing it is what keeps this
+  // client on the same device fingerprint as the official one. Our own copy in
+  // omp's agent directory is the fallback for machines without the IDE.
+  const paths = [join(homedir(), ".qoder", ".auth", "machine_id"), agentPath("qoder-machine-id")];
   for (const p of paths) {
     if (existsSync(p)) {
       try {

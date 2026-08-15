@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import {
   buildAuthHeaders,
   getQoderBaseUrl,
@@ -10,6 +9,7 @@ import {
   isQoderCNMode,
 } from "./cosy.js";
 import { type QoderModelDef, staticCnModels, staticModels, ZERO_COST } from "./models-static.js";
+import { agentPath } from "./paths.js";
 
 /** Shape of a single entry returned by the Qoder /model/list endpoint. */
 interface QoderModelEntry {
@@ -27,12 +27,7 @@ interface QoderModelEntry {
 }
 
 function getQoderCachePath(mode?: string): string {
-  return join(
-    homedir(),
-    ".pi",
-    "agent",
-    isQoderCNMode(mode) ? "qoder-cn-models-cache.json" : "qoder-models-cache.json",
-  );
+  return agentPath(isQoderCNMode(mode) ? "qoder-cn-models-cache.json" : "qoder-models-cache.json");
 }
 
 export function getCachedModels(mode?: string): QoderModelDef[] {

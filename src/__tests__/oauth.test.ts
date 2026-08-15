@@ -1,17 +1,15 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync } from "node:fs";
 import type * as NodeOs from "node:os";
-import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { updateQoderModelsCache } from "../models.js";
 import { autoLoginQoderFromEnvironment, getCachedCredentials, getQoderPatForMode } from "../oauth.js";
 import { credentialsFromPat } from "../pat.js";
 
-// The production code resolves `~/.pi/agent/auth.json` at module top level
-// (`src/oauth.ts`), so the home directory has to be redirected before any
-// import is evaluated: `vi.hoisted` runs first, `vi.mock` is hoisted with it.
-// The mock covers every `node:os` importer inside the module graph; setting
-// HOME/USERPROFILE covers code that resolves the home directory natively
-// (e.g. pi's own externalized `AuthStorage`).
+// The identity file and the model cache both resolve under omp's agent
+// directory, so the home directory has to be redirected before any import is
+// evaluated: `vi.hoisted` runs first and `vi.mock` is hoisted with it. The mock
+// covers every `node:os` importer inside the module graph; setting
+// HOME/USERPROFILE covers code that resolves the home directory natively.
 // This file owns its own temp home so it can never race models-cache.test.ts.
 const TEST_HOME = await vi.hoisted(async () => {
   // Dynamic imports: this callback runs before the static imports above are
@@ -20,9 +18,12 @@ const TEST_HOME = await vi.hoisted(async () => {
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const home = mkdtempSync(join(tmpdir(), "qoder-oauth-test-"));
-  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  mkdirSync(join(home, ".omp", "agent"), { recursive: true });
   process.env.HOME = home;
   process.env.USERPROFILE = home;
+  // `agentPath` honors PI_CODING_AGENT_DIR; a value inherited from the
+  // developer's shell would move the identity file out of this temp home.
+  delete process.env.PI_CODING_AGENT_DIR;
   return home;
 });
 
@@ -31,7 +32,21 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: () => TEST_HOME };
 });
 
-const AUTH_FILE = join(TEST_HOME, ".pi", "agent", "auth.json");
+// omp's AuthStorage is faked so the credential write lands somewhere observable
+// instead of the real SQLite store. The Map backs both directions, which lets a
+// test seed an existing credential and then assert what replaced it.
+const authStore = vi.hoisted(() => new Map<string, unknown>());
+const authGet = vi.hoisted(() => vi.fn());
+const authSet = vi.hoisted(() => vi.fn());
+
+vi.mock("@earendil-works/pi-coding-agent", () => ({
+  AuthStorage: { create: () => ({ get: authGet, set: authSet }) },
+}));
+
+authGet.mockImplementation((provider: string) => authStore.get(provider));
+authSet.mockImplementation((provider: string, credential: unknown) => {
+  authStore.set(provider, credential);
+});
 
 vi.mock("../pat.js", () => ({
   credentialsFromPat: vi.fn().mockResolvedValue({
@@ -58,9 +73,8 @@ describe("oauth autoLoginQoderFromEnvironment", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.env = { ...originalEnv };
-    // Each test starts from an empty auth store in this file's temp home. No
-    // snapshot/restore of a real credentials file is needed any more.
-    rmSync(AUTH_FILE, { force: true });
+    // Each test starts from an empty credential store.
+    authStore.clear();
   });
 
   afterEach(() => {
@@ -85,24 +99,31 @@ describe("oauth autoLoginQoderFromEnvironment", () => {
     delete process.env.QODER_PAT;
 
     await autoLoginQoderFromEnvironment("qoder-test-provider", "global");
-    expect(getCachedCredentials("mock-token", "qoder-test-provider")).toBeNull();
+
+    expect(authSet).not.toHaveBeenCalled();
+    expect(getCachedCredentials("qoder-test-provider", "global")).toBeNull();
   });
 
-  it("re-exchanges an environment PAT even when cached credentials exist", async () => {
+  it("re-exchanges an environment PAT even when a credential is already stored", async () => {
     process.env.QODER_PERSONAL_ACCESS_TOKEN = "pt-global-new-account";
-    const auth = existsSync(AUTH_FILE) ? JSON.parse(readFileSync(AUTH_FILE, "utf8")) : {};
-    auth["qoder-test-provider"] = {
+    authStore.set("qoder-test-provider", {
       type: "oauth",
       access: "old-access-token",
       refresh: "old-refresh-token",
       expires: Date.now() + 3600000,
       userID: "old-user",
-    };
-    writeFileSync(AUTH_FILE, JSON.stringify(auth), "utf8");
+    });
 
     await autoLoginQoderFromEnvironment("qoder-test-provider", "global");
 
     expect(credentialsFromPat).toHaveBeenCalledWith("pt-global-new-account", "global");
+    // The freshly exchanged credential must replace the stored one, not sit
+    // beside it: the whole point of re-exchanging on startup.
+    expect(authSet).toHaveBeenCalledWith(
+      "qoder-test-provider",
+      expect.objectContaining({ access: "mock-access-token", userID: "mock-user-123" }),
+    );
+    expect(getCachedCredentials("qoder-test-provider", "global")?.access).toBe("mock-access-token");
     expect(updateQoderModelsCache).toHaveBeenCalledWith(
       "mock-access-token",
       "mock-user-123",

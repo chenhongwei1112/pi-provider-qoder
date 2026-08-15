@@ -1,5 +1,5 @@
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
-import { getQoderManageUrl, getQoderMode, getQoderUsageURL, isQoderCNMode } from "./cosy.js";
+import { getQoderManageUrl, getQoderMode, getQoderUsageURL, isQoderCNMode, ProviderUserAgent } from "./cosy.js";
 
 interface QoderQuota {
   total: number;
@@ -39,7 +39,7 @@ async function fetchQoderUsageForMode(credentials: OAuthCredentials, mode: strin
     headers: {
       Authorization: `Bearer ${credentials.access}`,
       Accept: "application/json",
-      "User-Agent": "pi-provider-qoder",
+      "User-Agent": ProviderUserAgent,
     },
   });
 

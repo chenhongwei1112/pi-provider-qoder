@@ -16,8 +16,9 @@ import {
 import { streamQoder } from "./stream.js";
 import { fetchQoderUsage, fetchQoderUsageCN } from "./usage.js";
 
-// pi supports a `fetchUsage` hook on the oauth config at runtime, but it is not
-// part of the published ProviderConfig type. Declare the extension locally.
+// omp supports a `fetchUsage` hook on the oauth config at runtime, but it is not
+// part of the `ProviderConfig` type published by `@earendil-works/pi-coding-agent`
+// (the module omp injects into extensions). Declare the extension locally.
 type OAuthConfigWithUsage = NonNullable<ProviderConfig["oauth"]> & {
   fetchUsage: (credentials: OAuthCredentials) => Promise<unknown>;
 };
@@ -36,22 +37,25 @@ function modelsForProvider(mode: string, providerID: string): Model<Api>[] {
   }) as unknown as Model<Api>[];
 }
 
-function createQoderOAuth(providerID: string, mode: string): OAuthConfigWithUsage {
+function createQoderOAuth(mode: string): OAuthConfigWithUsage {
   return {
     name: isQoderCNMode(mode) ? "Qoder CN (PAT)" : "Qoder (Browser OAuth / PAT)",
     login: isQoderCNMode(mode) ? loginQoderCN : loginQoder,
     refreshToken: isQoderCNMode(mode) ? refreshQoderTokenCN : refreshQoderToken,
     getApiKey: (cred: OAuthCredentials) => cred.access,
-    modifyModels: (models: Model<Api>[], _cred: OAuthCredentials) => {
-      const nonQoder = models.filter((m: Model<Api>) => m.provider !== providerID);
-      return [...nonQoder, ...modelsForProvider(mode, providerID)];
-    },
+    // Deliberately no `modifyModels`: omp clones the provider config across its
+    // worker boundary, so a function member makes that clone throw ("The object
+    // can not be cloned"), omp logs "extension model projection failed; serving
+    // unprojected catalog", and the hook is never invoked (verified: 0 calls
+    // under omp, 10 under pi). `registerProvider` already passes the correct
+    // catalog as `models`, and a login refreshes the on-disk cache through
+    // `updateQoderModelsCache`, which `session_start` and the next startup read.
     fetchUsage: isQoderCNMode(mode) ? fetchQoderUsageCN : fetchQoderUsage,
   };
 }
 
 function registerQoderProvider(pi: ExtensionAPI, providerID: string, mode: string): void {
-  const oauth = createQoderOAuth(providerID, mode);
+  const oauth = createQoderOAuth(mode);
   pi.registerProvider(providerID, {
     baseUrl: getQoderBaseUrl(mode),
     api: "qoder-api" as Api,
@@ -64,7 +68,7 @@ function registerQoderProvider(pi: ExtensionAPI, providerID: string, mode: strin
 async function refreshModelsAtStartup(providerID: string, mode: string): Promise<void> {
   if (!isCacheStale(mode)) return;
 
-  const credentials = getCachedCredentials("", providerID);
+  const credentials = getCachedCredentials(providerID, mode);
   if (!credentials?.access) return;
 
   const identity = identityFromCredentials(credentials, mode);
