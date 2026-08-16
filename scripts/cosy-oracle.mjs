@@ -28,7 +28,11 @@ export async function createOracle({ auditDir, machineId, uid, encryptUserInfo, 
   glue.initWasmModule();
   await glue.initWasm();
 
-  // WASM 侧的 userInfoJson 就是登录响应里存下来的三段值，客户端只做回放。
+  // userInfoJson 的三段值由调用方给定，WASM 只负责原样回放（这是预言机能拿它做
+  // 对照的前提）。注意：官方客户端里这两个值**不是**服务端下发的 —— 每条登录路径
+  // 都先置空（pretty.mjs:114651 PAT / :114720 job_token / :114939 browser /
+  // :115056 external），再由 regenerateRuntimeFields() 本地经 WASM 导出
+  // generate_runtime_auth_fields 算出（:114927-114931）。详见台账差异第 14 行。
   glue.createContext(machineId, cosyVersion, JSON.stringify({ uid, encrypt_user_info: encryptUserInfo, key }));
 
   return {
