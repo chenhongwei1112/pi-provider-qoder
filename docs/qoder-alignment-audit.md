@@ -46,7 +46,7 @@ JS 层可读的逻辑是唯一例外，且必须带行号。
 | 11 | 1 | `Accept-Encoding` | **按请求类不同**：auth GET 带 `identity`，infer 不带 | 正好反了：infer 带（`transport.ts:205`），model-list 不带（`models.ts:153-160` 只并入 `Accept`） | `V.catalogRequest.headers["Accept-Encoding"]` = `identity`；`V.inferRequest.headerNames` 无此项；`锁定:"still sends exactly these headers the official client does not"` | 低 | 必须对齐 |
 | 12 | 1 | auth GET 的 `Content-Type` | 即使是无体 GET 也带 `Content-Type: application/json` | model-list 不带（`models.ts:153-160`）。**该差异不在锁定套件里**——锁定套件只比 infer 类 | `V.catalogRequest.headers["Content-Type"]` | 低 | 必须对齐 |
 | 13 | 1 | `Cosy-MachineHostname` | 仅 `requestClass === "infer-sse"` 时发（`JS:69460-69462`），且主机名必须 header-safe：不安全时 `JS:69407`→`JS:69383` 会规范化甚至省略并打 warn | 从不发 | `JS:69460-69462`、`JS:69407`、`JS:69383-69386`；**故意不冻结进向量**（值随机器变化，冻结会让测试在别的机器上红，见 `scripts/freeze-vectors.mjs:23-34`） | 中 | 必须对齐 |
-| 14 | 1 | `info` / `Cosy-Key` 来源 | 架构性差异：登录响应下发 `encrypt_user_info` 与 `key`，客户端此后**原样回放**，不做任何本地加密 | 本地现算：AES-CBC 加密 userInfo 得 `info`、RSA 加密 AES key 得 `Cosy-Key`（helper `cosy.ts:212-226`，调用点 `cosy.ts:299`、`cosy.ts:308-309`） | `预言机:"replays the credential-supplied user info and key verbatim"`（喂 `EUI`/`KEY123` 原样出现在 `Authorization` 载荷与 `Cosy-Key`）；`scripts/cosy-oracle.mjs:31-32` | 中 | **待定：依赖面 5**——插件是否拿得到官方登录响应里的那两个字段，要等 Task 8 的面 5（PAT→jobToken 交换与 `/api/v1/userinfo` 返回体）确认。拿不到即 `不能对齐`，拿得到即 `必须对齐`。不要在这里猜 |
+| 14 | 1 | `info` / `Cosy-Key` 来源 | **本地生成，不是服务端下发。**Task 7 写的"登录响应下发、客户端原样回放"是推断，本轮实测推翻：三条登录路径都先把 `encrypt_user_info` 与 `key` 置成空串（PAT `JS:114651`、device token `JS:114939`、外部 job token `JS:115056`），随后 `regenerateRuntimeFields()`（`JS:114927-114931`）调 WASM 导出 `generate_runtime_auth_fields`，喂 `{uid, organization_id, organization_tags, data_policy_agreed}`，拿回的就是这两个字段；再灌进 QoderContext（`JS:114891-114892`）由它原样回放。两者不入库（`JS:234481` 持久化前剥掉），每次 token 刷新重算（`JS:115126-115128`、`JS:115145-115147`） | 本地现算：AES-CBC 加密 userInfo 得 `info`、RSA 加密 AES key 得 `Cosy-Key`（helper `cosy.ts:212-226`，调用点 `cosy.ts:299`、`cosy.ts:308-309`）。**方案同构**，差的是被加密的明文：插件塞 `{uid, security_oauth_token, name, aid, email}`（`cosy.ts:300-306`），官方塞上面那四个键 | `预言机:"replays the credential-supplied user info and key verbatim"`（只证 QoderContext 原样回放，不证来源）；`JS:114927-114931`、`JS:114651`、`JS:114939`、`JS:115056`、`JS:234481`。**本轮新增实测**（直接调 `generate_runtime_auth_fields`，见下方面 5 说明）：输出恰为 `{encrypt_user_info, key}` 两键；`key` 恒 172 个 base64 字符 = 128 字节 = RSA-1024 密文，与 `cosy.ts:7-12` 那把 1024 位公钥同宽；`encrypt_user_info` 的长度恒等于 PKCS7(输入 JSON 字节数)——86→128、102→152、118→172、175→236 个 base64 字符，即 **WASM 原样加密 JS 交给它的 JSON，不筛字段也不重塑**；同一输入连调两次密文不同（每次换随机 key/IV） | 中 | **必须对齐。**面 5 已证插件拿得到官方放进去的每一项：`uid` 来自 `/api/v1/userinfo`（`pat.ts:124`），`organization_id` / `organization_tags` 就在同一个响应里、官方也是从那儿取的（`JS:115002`），只是 `pat.ts:118-126` 没读（见差异第 49 行）；`data_policy_agreed` 是本地设置（插件已有 `Cosy-Data-Policy`，`cosy.ts:18`）。**没有任何阻碍，所以不是"不能对齐"。**要改两处：明文换成官方那四个键（别再把 bearer token 塞进 `info`），以及每凭据算一次而不是每请求算一次（见差异第 50 行） |
 | 15 | 1 | 端点解析 | 动态发现：`/api/v3/service/region/endpoints` 与 `/api/v4/service/region/endpoints`，配 `/algo/api/v1/ping` 健康检查与端点缓存（`JS:77297`） | 硬编码 `api3.qoder.sh` / `gateway.qoder.com.cn`（`cosy.ts:83-93`） | `JS:77297` | 中 | 必须对齐（无阻碍：同一套凭据即可调该端点） |
 
 #### 面 1 未覆盖
@@ -138,6 +138,93 @@ messages, tools, parameters, chat_context, model_config, business`
 - **`stream_options.include_usage`**。两侧都不发；插件确实收到了 usage（`events.ts:53-63` 记录了实测到的字段子集，`src/__tests__/stream.test.ts:"captures usage, responseId and responseModel from the finish chunk"` 钉住映射），所以缺这个字段目前没有可观测后果。是否有边缘情况属面 3。
 - **`messages` 的完整变换链**。官方在 `DuA`（`JS:112273-112286`）之前还过 `KPH`，之后 assistant/user 各走 `kCQ`/`zCQ`；本轮只核对了 reasoning 字段、`contents`、`cache_control`、`tool_calls.index` 四处，没有逐块比对 tool_result 与图片的编码。
 
+### 面 3：响应流解析
+
+**先纠一处入口。**Task 8 简报让搜 `handleSSEMessage` / `case"connected"` / `stream_error`。`handleSSEMessage`（`JS:119598-119618`）是**配置中心 SDK** 的 SSE，事件只有 `connected` / `config:change` / `heartbeat`，与 chat 无关；`stream_error` 是错误分类词表里的一个 code（`JS:113491`），不是流事件。chat 的流解析在
+`JS:133069-133254`（StreamAdapter 主循环）、`JS:132788-132816`（包络解析 `z3`）、`JS:132589-132723`（SSE 分帧生成器）、`JS:132826-132845`（`finish_reason` 归类）。以下行号都指这几处。
+
+**官方 chat SSE 不解密。**`decrypt_server_response` 的四个调用点全是非流式 JSON：目录缓存（`JS:105922`）、`listModelsFromRemote`（`JS:117849`）、`/api/v3/user/status`（`JS:117916`）、`/api/v2/quota/usage`（`JS:117937`），封装在 `JS:1028-1038`。StreamAdapter 的取数路径（`JS:133133-133151`）没有解密调用。
+
+| # | 面 | 项 | 官方行为 | 插件行为 | 证据 | 风险 | 判定 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 32 | 3 | SSE 分帧粒度 | 按**事件块**分帧：空行才交付一帧，多条 `data:` 用 `\n` 拼接，`event:` / `id:` 随帧带出，`retry:` 显式忽略，只剥一个前导空格与行尾 `\r`，另有单行与单事件的字节上限（`JS:132668-132708`、`JS:132678`、`JS:132691`、`JS:132694-132702`） | 按**行**分帧：每条 `data:` 行独立交付，`event:` 与 `id:` 直接丢弃（`sse.ts:42`），payload 两端 `trim()`（`sse.ts:40`、`sse.ts:43`），无字节上限 | `JS:132668-132708` vs `sse.ts:34-46`；`src/__tests__/sse.test.ts:"drops lines that are not data fields"` 明确钉住"丢弃 `event:`" | 中 | 必须对齐 |
+| 33 | 3 | 哨兵字符串全集 | 四种：`[DONE]`、`[NOT_EXCEED_QUOTA]`、`[EXCEED_QUOTA]…`、`[NOTIFICATIONS]#…`（`JS:132782-132786`），外层与包络内 `body` 两处都判；`[NOTIFICATIONS]#` 后面那段 JSON 会解出 `notifications` 交给 `onCreditNotification`（`JS:133060-133068`、`JS:133137-133146`、常量 `JS:133255`） | 只认 `[DONE]`（`events.ts:113`、`events.ts:122`）。另外三个既不是 `[DONE]` 也不是合法 JSON，走到 `JSON.parse` 抛 `SyntaxError`，被"单行坏了不杀流"的分支静默跳过（`events.ts:145-150`）——**配额耗尽与额度通知因此完全不可见** | `JS:132782-132786`、`JS:133137-133146` vs `events.ts:112-129`、`events.ts:141-152` | 中 | 必须对齐 |
+| 34 | 3 | 错误包络的判定与分类 | 进错误分支要求 `statusCodeValue` 与 `body` **都存在**，且 `event !== "finish"`（`JS:132791-132793`）；然后把 body 解成 `qoderApiError`，映出 401 / `duplicateRequest` / `modelQueued` / `retryAfterMs`，body 里含 `login expired` / `login timeout` 也强制成 401（`JS:132794-132805`）；顶层 `d.error` 另抛（`JS:133157`） | 只看 `envelope.statusCodeValue` 真值且 `!== 200`，抛一条纯文本 Error（`events.ts:117-119`），没有分类、没有 401 归一、没有重试提示；`inner.error` 不检查。**又因为面 3 第 32 行丢了 `event:`，官方豁免的 `event: finish` 非 200 帧在插件这里会变成硬错误** | `JS:132788-132806`、`JS:133157` vs `events.ts:115-119`、`events.ts:131-139` | 中 | 必须对齐 |
+| 35 | 3 | `finish_reason` 词表 | `GcA`（`JS:132826-132845`）：`stop`→`end_turn`、`tool_calls`/`function_call`→`tool_use`、`length`→`max_tokens`、`content_filter`/`refusal`→`refusal`、`"null"`/`null`/`undefined`→无终止，**其余抛 `UnsupportedFinishReasonError`**；另有前置表 `QsL`：`model_context_window_exceeded` 抛 status 413 的错（`JS:132821-132824`、`JS:132854`） | 七键映射表（`events.ts:40-51`）缺 `refusal`，也没有 `model_context_window_exceeded`；未命中一律当 `stop`（`events.ts:290-298`）。后果：上下文溢出的一轮会报成正常完成，只是输出被截断，用户看不到任何提示。`"null"` 这个字符串是真值，也会走到映射表并落到 `stop` | `JS:132821-132845`、`JS:132854` vs `events.ts:40-51`、`events.ts:286-299`、`events.ts:138` | 中 | 必须对齐 |
+| 36 | 3 | reasoning 通道全集 | 三条：`reasoning_content`（thinking_delta）、`reasoning_item`（`summary[].text` 拼成 thinking；`encrypted_content` 单独开一个 `redacted_thinking` 块）、`signature`（补到 thinking 块上的 `signature_delta`），并处理 thinking 与 text 块的互斥切换与交错缓冲（`JS:133100-133122`、`JS:133174-133182`） | 只处理 `reasoning_content`（`events.ts:20-21`、`events.ts:157-179`）。`reasoning_item` 与 `signature` 都不接收，所以差异第 24 行里"不回传 signature"是**没有来源**，不是选择不发 | `JS:133100-133122` vs `events.ts:19-28`、`events.ts:155-179` | 中 | 必须对齐 |
+| 37 | 3 | 遗留 `function_call` 分片 | 收到 `delta.function_call` 且没有 `tool_calls` 时，就地合成一条 `tool_calls[0]`（首片带 `fc_<messageId>_<index>` 形式的 id，后续片只带 arguments），再走统一路径（`JS:133166-133171`） | `QoderDelta` 里没有这个字段（`events.ts:19-28`），整条分片被忽略 | `JS:133166-133171` vs `events.ts:19-28`、`events.ts:155-283` | 低 | 必须对齐 |
+| 38 | 3 | 工具调用流的容错 | 参数 JSON 截断时做修复：抽出补全后缀并再发一段 `input_json_delta`（`JS:133237-133239`），插入内容前先关掉未完成的工具块（`JS:133088-133095`），孤儿分片（有 arguments 无对应 index）抛 `MalformedToolCallStreamError`（`JS:133072`、`JS:133206`）；声明了 `tool_calls` 却没有块时只打 warn 并**保留** `tool_use`（`JS:133220`） | 参数解析不了就静默当 `{}`（`events.ts:323-326`）——半截 JSON 直接变成空参数调用；孤儿分片被 `state.contentIndex` 默认 0 的保护挡住但不报错（`events.ts:265-281`）；声明了 `tool_calls` 却没有块时**抛硬错**（`events.ts:346-354`） | `JS:133072`、`JS:133088-133095`、`JS:133206`、`JS:133220`、`JS:133237-133239` vs `events.ts:265-281`、`events.ts:320-341`、`events.ts:343-354` | 中 | 必须对齐（**只指 JSON 修复这半**。抛硬错那半是插件有意选择，理由写在 `events.ts:343-354`，比官方的"保留 tool_use 但没有工具"更安全，保留） |
+| 39 | 3 | `<thinking>` 字面标签 | 流里**不做任何标签解析**：`l.content` 直接变 `text_delta`（`JS:133184-133187`），thinking 只来自第 36 行那三条结构化通道。整个 bundle 里 `<thinking>` 字面量 0 命中（字符串搜索，仅作旁证，结论以 `JS:133184-133187` 的正读为准） | 对 `content` 跑 `ThinkingTagParser`（`events.ts:195-196`、`thinking-parser.ts`），还要在 `reasoning_content` 上剥标签（`events.ts:163`） | `JS:133184-133187`、`JS:133100-133122` vs `events.ts:155-212` | 低 | 必须对齐（**次序依赖差异第 24 行**：标签是插件自己把 thinking 内联进回传 `content`（`transform.ts:143-144`）教出来的，先修第 24 行再拆解析器；顺序颠倒会当场回归，`stream.test.ts:"keeps tool call arguments intact when a <thinking> tag leaks into content"` 就是为此存在的） |
+| 40 | 3 | 响应解密 | 非流式 JSON 一律过 `decrypt_server_response`：目录缓存（`JS:105922`）、`listModelsFromRemote`（`JS:117849`）、`/api/v3/user/status`（`JS:117916`）、`/api/v2/quota/usage`（`JS:117937`）；封装 `JS:1028-1034` 在 WASM 抛异常时原样返回入参，`JS:1035-1038` 再 `JSON.parse`。SSE 流不解密 | 一处都不解密：`grep -i decrypt src/` **零命中**；目录走 `response.json()`（`models.ts:166`），配额走 `response.json()`（`usage.ts:50`） | **本轮实测**（加载官方 WASM 直接调 `decryptServerResponse`）：① 它是请求体混淆的**精确逆运算**——把 `{"hello":"world","n":42}`、`{"assistant":[{"key":"auto"}]}`、`{}` 用 `qoder-encoding.ts` 编码后喂进去，逐字返回原串；② 对明文是**恒等**——`{"a":1}`、`{"json":true}`、`""`、`{"assistant":[]}`、`not json at all` 全部原样返回。官方之所以敢无条件调用，正是因为它对明文是直通。`JS:105922`、`JS:117849`、`JS:117916`、`JS:117937`、`JS:1028-1038` vs `models.ts:166`、`usage.ts:50` | 中 | 必须对齐。插件今天能跑，说明服务端对它的请求**当前**返回明文——这是对当下服务端行为的观察，不是保证。注意插件的 chat URL 是带 `Encode=1` 的（`cosy.ts:104`），可见这个 flag today 并不单独决定响应是否编码；`Encode=1` 究竟控制什么本轮没测，不要据此推论。因为该函数对明文恒等，**加上它严格优于不加**：今天零行为变化，服务端哪天改成编码返回，区别就是优雅处理与满屏乱码 |
+
+#### 面 3 未覆盖
+
+- **`cache_write_tokens` 的语义**。官方 `LS`（`JS:132900-132908`）只读 `prompt_tokens_details.cached_tokens`，不读 `cache_write_tokens`；插件读（`events.ts:80`），注释说是实测到的字段。本轮没有抓到能证实或否证其语义的响应样本，故不列为差异行。
+- **官方块流的下游语义**。StreamAdapter 输出的是 Anthropic 形状的 `content_block_*` 事件，块序号带 `B += U` 的偏移与负索引哨兵（`Mz = -1`、`To = -2`，`JS:133255`）。插件输出 pi 的事件形状，两者的块编号规则无法逐一对应，只比对了"什么触发开块/关块"，没比对编号。
+- **超时与空闲看门狗的数值**。官方 SSE 侧有首包与空闲两档超时、单行/单事件字节上限（`JS:132639-132640`、`JS:132694`、`JS:132735-132739`、`JS:132776`）；插件有自己的看门狗（`transport.ts`、`stream.ts:98`）。数值没逐项核对，与面 1 未覆盖的"重试与超时策略"是同一笔账。
+- **`event: finish` 是否真的会带非 200 `statusCodeValue`**。第 34 行的后果推断建立在官方为它专门开了豁免（`JS:132793`）这一事实上，但本轮没有抓到这样的实际帧。
+
+### 面 4：模型目录与配额
+
+| # | 面 | 项 | 官方行为 | 插件行为 | 证据 | 风险 | 判定 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 41 | 4 | scene 解析与跨场景合并 | 遍历响应里**每一个** scene（配置 scene 排第一），配置 scene 的条目在 `allModels` 里覆盖同 key 的其他 scene，`is_default` 只认配置 scene，配置 scene 缺失时打 warn 但不失败（`JS:105953-105970`）；配置 scene 还会并入 `byok_enterprise` 那一档（`JS:105500-105514`，常量 `JS:106048`），按去重键跳过已有条目。配置 scene = `getClientMetadata().scene`，默认 `"assistant"`（`JS:106064`、`JS:400-402`、`JS:404`） | `resData.assistant \|\| resData.chat`（`models.ts:173`）：只取一个 scene，不合并、不并 `byok_enterprise`、不记 `server_scene`；而且 `assistant` 缺失时**静默退到另一个 scene**（`chat` 是旧端点的缩减目录），拿到的是一份不同的目录却毫无提示 | `JS:105953-105970`、`JS:105500-105514`、`JS:106064` vs `models.ts:166-181`；`src/__tests__/models-cache.test.ts:"prefers the assistant scene over chat (qodercli default scene)"` 钉住优先级 | 中 | 必须对齐 |
+| 42 | 4 | 目录字段不参与本地决策 | 解析并保留 `efforts` / `supports_disabled` / `default_effort` / `available_context_windows` / `default_context_window` / `context_config` / `thinking_config` / `feature_switches`（兼容 `function_switches`）/ `strategies` / `promotion` / `price_factor` / `original_price_factor` / `is_free` / `tags` / `server_scene`（`JS:105961`、`JS:117859-117860`），并据此做灰度与计费展示 | 只从条目里推出五项：`reasoning`（`is_reasoning \|\| thinking_config`）、`supportsEffort`（`thinking_config.enabled.efforts`）、`input`（`is_vl`）、`contextWindow`、`maxTokens`（`models.ts:195-215`）。其余字段一个都不解析 | `JS:105961`、`JS:117859-117860` vs `models.ts:195-215` | 低 | 无需对齐（原始条目整体留在 `configs` 里并原样回传成 `model_config`，见差异第 20 行，所以服务端仍然看得到这些字段；插件只是不据此做本地决策） |
+| 43 | 4 | 服务端的默认模型 | 从配置 scene 里 `is_default` 为真的条目取 `defaultModelKey`（`JS:105964`、`JS:105971`） | 完全不读 `is_default`（`models.ts:179-215`），模型顺序就是响应顺序 | `JS:105964`、`JS:105971` vs `models.ts:179-215` | 低 | 无需对齐（omp 自己管默认模型的选择，服务端观测不到这个差异） |
+| 44 | 4 | 上下文窗口的选择 | 记下服务端给的 `available_context_windows` 与 `default_context_window`，`context_config` 的 windows 优先（`JS:105961`），**不改写**条目里的 `is_default` | 取 `context_config` 里 `token_count` 最大的那档当 `contextWindow`（`models.ts:184-194`），并把 `is_default` 重写到最大那档上（`models.ts:104-122` 的 `withMaxContextAsDefault`）。这个被改写的对象正是回传给服务端的 `model_config`（`request.ts:215`），**于是服务端收到一份 `is_default` 是插件编的 `context_config`** | `JS:105961` vs `models.ts:104-122`、`models.ts:184-194`、`request.ts:215` | 中 | 必须对齐（要不要默认用最大窗口是产品选择，可以保留；**但不能把改写后的 `is_default` 回传给服务端**） |
+| 45 | 4 | 配额与额度 | 三个来源：`/api/v2/user/plan`（`JS:117873`）、`/api/v3/user/status`（`JS:117905`）、`/api/v2/quota/usage`（`JS:117930`）；流内还从 usage 里取 `credits` / `original_credits` / `billable`（`JS:132904-132907`），配合 `[EXCEED_QUOTA]` / `[NOT_EXCEED_QUOTA]` 哨兵（`JS:132786`） | 只读 `/api/v2/quota/usage`（`cosy.ts:115-117`、`usage.ts:37-44`，端点与官方**同一个**）；`mapUsage` 不取 `credits` / `original_credits` / `billable`（`events.ts:54-63`、`events.ts:75-88`）；哨兵见差异第 33 行 | `JS:117873`、`JS:117905`、`JS:117930`、`JS:132904-132907` vs `usage.ts:36-85`、`events.ts:54-88` | 低 | 无需对齐（都只影响本地展示；`/api/v2/quota/usage` 已足够，另两个端点不必加） |
+| 46 | 4 | 目录缓存与刷新节奏 | 按 uid 分文件的共享缓存，用响应正文的 md5 去重（相同就只 touch mtime）（`JS:105922-105940`）；后台 120 s 一次同步、启动时 0–30 s 随机抖动、共享缓存 100 s 内视为新鲜（`JS:106007-106019`、常量 `JS:106048`）；两次 fetch 间隔小于 10 s 直接跳过（`JS:105899-105902`） | 单个 JSON 文件，1 小时过期（`models.ts:124-135`），只在登录与 token 刷新时刷（`oauth.ts:159`、`oauth.ts:172`、`oauth.ts:203`、`oauth.ts:272`），没有后台同步、没有 md5 去重、没有抖动 | `JS:105899-105940`、`JS:106007-106019` vs `models.ts:124-135`、`oauth.ts:159-272` | 低 | 无需对齐（插件刷得比官方**少**，不构成请求频率上的异常特征；缓存新鲜度是本地取舍） |
+
+#### 面 4 未覆盖
+
+- **目录响应的实际 scene 集合**。`parseModelList` 遍历所有 scene，但本轮没有一份真实的 `model/list` 响应正文（向量只冻结了请求侧），所以"`assistant` 之外还有哪些 scene、`byok_enterprise` 是否真的出现"无从确认。`cosy.ts:96-99` 那段注释提到的 38 个跨场景条目属于同一笔账。
+- **`strategies` 的灰度语义**。官方把它解析成 `{tag, enabled, disabled_message_key}`（`JS:105516-105524`）并 debug 打印每个条目的 `strategies`（`JS:105960`），但用它做什么判断本轮没有回溯到。
+- **`price_factor` 与 `ZERO_COST`**。插件把所有模型的 cost 写成 `ZERO_COST`（`models.ts:212`）。官方拿 `price_factor` 做计费展示。是否有服务端可观测的后果不明，故不列为差异行。
+
+### 面 5：认证与身份
+
+这一面同时是差异第 14 行的判定依据。`generate_runtime_auth_fields` 的实测是这样做的：把 `.qoder-audit/1.1.23/glue.mjs` 连同 `qoder_auth_wasm_bg.wasm` 复制到临时目录、追加一行导出把 wasm-bindgen 模块命名空间暴露出来，再直接调该导出。**没有改动仓库里的任何文件，也没有改动 `.qoder-audit/` 里的产物**；`scripts/cosy-oracle.mjs` 只导出了 context 那一层，够不到这个函数。要把它固化进预言机，得给 `carve-glue.mjs` 的导出清单加一项——留给第二阶段。
+
+**`scripts/cosy-oracle.mjs:31` 的注释是错的**，它写着"WASM 侧的 userInfoJson 就是登录响应里存下来的三段值，客户端只做回放"。前半句已被上面的实测推翻（`uid` 确实来自登录响应，另两个是本地算的）。本轮不改源码，这条留给第二阶段。
+
+| # | 面 | 项 | 官方行为 | 插件行为 | 证据 | 风险 | 判定 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 47 | 5 | openapi 辅助请求的请求头 | `openApiJsonRequest` 只发 `Accept: application/json` 与 `User-Agent: qoder/<version>`，有 token 才加 `Authorization`，有 body 才加 `Content-Type`（`JS:114954-114957`）。**一个 COSY 头都不发** | PAT 交换与 userinfo 都额外发 `Cosy-Version: 1.0.1` 与 `Cosy-ClientType: 5`（`pat.ts:60-66`、`pat.ts:109-115`）。`1.0.1` 是仓库里第三个版本串——另两个是 `cosy.ts:16` 的 `1.1.3` 与实际的 `1.1.23`（见差异第 2 行） | `JS:114954-114957` vs `pat.ts:60-66`、`pat.ts:109-115` | 中 | 必须对齐（删掉这两个头；顺带把 `1.0.1` 这个字面量一起清掉） |
+| 48 | 5 | 辅助请求的 `User-Agent` | 每个 openapi 与刷新请求都发 `qoder/<version>`（`JS:114954`、`JS:115104`、`JS:115138`） | 全部发 `omp-provider-qoder`（`cosy.ts:27`，用在 `pat.ts:63`、`pat.ts:112`、`oauth.ts:234`、`login.ts:140`、`login.ts:179`、`usage.ts:42`） | `JS:114954`、`JS:115104`、`JS:115138` vs `cosy.ts:21-27` | 低 | 无需对齐（**有意**：`cosy.ts:21-27` 明确写了这是自报身份、不冒充官方客户端，签名头才承载真实客户端标识。这是 fork 的取舍，不是 bug） |
+| 49 | 5 | userinfo 响应的读取 | 取 `id`/`user_id`/`uid` 三个别名之一当 uid，缺则**硬失败**；`name`/`username`/`user_name`、`email`、`avatar_url`、`organization_id`（另回退到 `organization.id`）、`organization_name`、`organization_tags`（含 `organizationTags` 驼峰）、`is_data_policy_modifiable` 全都读，并校验 uid 与已存凭据一致（不一致抛 403）（`JS:114995-115002`）；组织 tags 还会再拉一次补全（`JS:114942-114948`） | 只读 `id`、`email`、`name`/`username`（`pat.ts:118-126`），失败时静默吞掉（`pat.ts:128-130`）。两个后果：① 服务端若返回 `uid` 而非 `id`，`userID` 为空串，之后 `buildAuthHeaders` 抛 `cosy: user id is empty`（`cosy.ts:292-293`）；② `organization_id` / `organization_tags` 拿不到——而它们正是官方喂给 `generate_runtime_auth_fields` 的输入（`JS:114929`，见差异第 14 行）与组织头的来源（见差异第 8 行） | `JS:114942-114948`、`JS:114995-115002` vs `pat.ts:103-131` | 中 | 必须对齐 |
+| 50 | 5 | `info` / `Cosy-Key` 的生命周期 | **每凭据一次**：`regenerateRuntimeFields()` 只在登录（`JS:114630`、`JS:114651`）与 token 刷新（`JS:115126`、`JS:115145`）时调，算出的一对灌进 QoderContext（`JS:114891-114892`、`JS:115147`），此后每个请求原样回放 | **每请求一次**：`buildAuthHeaders` 里现摇一个随机 AES key、现算 `info` 与 `Cosy-Key`（`cosy.ts:299`、`cosy.ts:308-309`），每个请求的 `Cosy-Key` 都不一样 | `JS:114891-114892`、`JS:114927-114931`、`JS:115145-115147` vs `cosy.ts:287-356`；`预言机:"replays the credential-supplied user info and key verbatim"`；本轮实测：`generate_runtime_auth_fields` 同输入连调两次密文不同，所以"每请求重算"在服务端是能看出来的 | 中 | 必须对齐 |
+| 51 | 5 | machine id 的推导与落盘 | 优先由硬件推导：`sha256("<salt>:linux:<硬件 uuid 小写>")` 再格式化成 UUID 形状，取不到或超时才随机（`JS:76181-76209`）；落盘走原子发布——`open(tmp,"wx",0o600)` + `link`，`link` 撞 `EEXIST` 就采纳已有值，失败再退 `rename`（`JS:76249-76282`），路径 `~/.qoder/.auth/machine_id`（`JS:76506`）；读取带重试与登录期修复（`JS:76222-76224`、`JS:76480-76495`） | 先读官方那个文件（`cosy.ts:269` 第一个路径），读不到就读自己的 `qoder-machine-id`，两个都没有就 `crypto.randomUUID()` 并用默认权限的 `writeFileSync` 写到 omp 目录（`cosy.ts:278-283`）。**从不由硬件推导，也从不写官方那个路径。**后果：没装 Qoder IDE 的机器上拿到的是随机值，之后再装 qodercli 会推导出**另一个** id，同一台机器出现两个设备指纹 | `JS:76181-76209`、`JS:76249-76282`、`JS:76506` vs `cosy.ts:265-285` | 中 | 必须对齐 |
+| 52 | 5 | device token 的刷新端点 | `POST <openapi>/api/v1/deviceToken/refresh`，体 `{refresh_token}`，头 `Content-Type` + `Accept` + `User-Agent: qoder/<version>`（`JS:115104`） | `POST <center>/algo/api/v3/user/refresh_token`，体 `{refreshToken}`（驼峰）（`cosy.ts:119-121`、`oauth.ts:226-237`）。这条路径在官方 1.1.23 的 bundle 里**命中 0 次**；失败后静默把有效期延一小时（`oauth.ts:278-283`），所以刷新一直不成功也不会有人发现 | `JS:115104` vs `cosy.ts:119-121`、`oauth.ts:226-283`；`cosy.test.ts:getQoderRefreshURL:"constructs correct global URL"` / `"constructs correct CN URL"` 钉住插件当前这条 URL（**它们钉的是现状，不是正确值**） | 中 | 必须对齐 |
+| 53 | 5 | device flow 的授权 URL 与轮询 | 授权 URL 带 `client_id`（CLI 用的那个固定 UUID，`JS:114161`、常量 `JS:114225`），参数序 `challenge, challenge_method, nonce, machine_id, client_id`；轮询只发 `Accept`，**只把 404 当 pending**（`JS:114166-114167`），间隔 1000 ms、总期限 300 s（`JS:114225`） | 授权 URL **没有 `client_id`**，参数序 `challenge, challenge_method, machine_id, nonce`（`login.ts:118`）；轮询多发 `User-Agent`（`login.ts:140`），把 202 **和** 404 都当 pending（`login.ts:145`），间隔 2000 ms × 90 次 = 180 s（`login.ts:128-129`） | `JS:114159-114167`、`JS:114225` vs `login.ts:113-145` | 中 | 必须对齐（缺 `client_id` 是实质项，其余是参数细节） |
+
+#### 面 5 未覆盖
+
+- **`cosy.ts:21-27` 那句"Qoder does not validate it"**。第 48 行的判定建立在这句话上，但它本身没有实测支撑——需要用一个异常 UA 打一次 openapi 才能定论。
+- **device flow 的 `client_id` 是否必需**。官方带，插件不带而登录仍然可用（这是插件在跑的功能），所以服务端当前不强制。是否会变、带不带是否影响风控，测不出来。
+- **service account 与 BYOK 路径**。官方另有 `/api/v1/serviceToken/exchange`（`JS:114984`）、`isServiceAccount()` 分支（影响差异第 4 行的 `injectClientIdentityHeaders`）与 BYOK 目录（`JS:117946-117953`）。omp 侧没有对应概念，本轮没有比对。
+- **`refresh_token_expire_time` 的处理**。官方在刷新前检查 refresh token 自身是否过期并主动作废凭据（`JS:115134-115136`）；插件把 `jobRefreshToken` 编进 refresh 串（`pat.ts:31`）却从不使用它（全仓只有编解码与测试引用），也不检查其过期。因为官方的 PAT 策略同样是重新交换 PAT（`JS:114654`、`JS:115115-115120`，与 `oauth.ts:196-208` 一致），这条死数据没有服务端可观测后果，故不列为差异行。
+
+### 面 6：CN 版差异
+
+**先回答那个问题：CN 与全球版的差异，在插件侧不只是域名——还有模型 key 映射（第 55 行），而且它是插件自己发明的一层，不是官方协议差异。签名与请求头在插件侧完全没有 CN 分支。**
+
+全仓 `isQoderCNMode` 的分支只落在六处：域名（`cosy.ts:84`、`cosy.ts:88`、`cosy.ts:92`、`cosy.ts:181-187`）、本地文件名（`models.ts:30`、`identity-store.ts:29`）、provider id 与展示名（`models.ts:198-207`、`index.ts:28-53`）、登录文案（`login.ts:49`、`login.ts:60`、`login.ts:80`）、CN 静态目录与 reasoning 集（`models.ts:48`、`models.ts:62-88`）、模型 key 映射（`request.ts:65`）。`buildAuthHeaders`（`cosy.ts:287-356`）与 `computeCosySignature`（`cosy.ts:244-263`）都不接受 mode 参数，**签名与头只有一条路径**。
+
+官方侧只能答一半：1.1.23 是全球版构建，region 只有 `us` / `sg` / `jp`（`JS:69612`），`gateway.qoder.com.cn` 在整个 bundle 里命中 0 次，`openapi.qoder.com.cn` 只出现在内置 Config SDK 的端点表里（`JS:119730`）。CN 版是另一个构建，本轮没有取证物。
+
+| # | 面 | 项 | 官方行为 | 插件行为 | 证据 | 风险 | 判定 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 54 | 6 | region 的选择 | region 表 `us: api1.qoder.sh` / `sg: api2.qoder.sh` / `jp: api3.qoder.sh`（`JS:69612`、常量 `JS:404`），**默认推理端点是 `api2`**（同行的 `eGA`）；实际用哪个由端点发现（`/api/v3/service/region/endpoints` 匿名签名版、`/api/v4/…` 带凭据版，`JS:77014-77034`）返回的 `center` / `inference` / `openapi` 三张表（`JS:77042-77045`）加 `/algo/api/v1/ping` 的健康探测决定：每个候选连打 10 次、必须 10 次全成、取截尾均值延迟（`JS:77099-77121`） | 所有用户硬编码 `api3.qoder.sh`（`cosy.ts:84`），也就是**日本 region**，与官方默认的 `api2`（新加坡）不同，更不做延迟探测 | `JS:404`、`JS:69612`、`JS:77014-77045`、`JS:77099-77121` vs `cosy.ts:83-85`。注意 `V.inferRequest.url` 里的 host 是本审计取证时**喂进去的输入**，不是官方默认值 | 中 | 必须对齐（与差异第 15 行同一处修复：接上端点发现，region 就不用猜） |
+| 55 | 6 | CN 模型 key 映射的有损往返 | 不做任何 key 改写，直接用服务端下发的 `key`（`JS:105961` 的 `G.key ?? G.model_key`、`JS:117860` 的 `key: F`） | 正向表把好看的 id 映成 CN 服务端 key（`cosy.ts:123-142`，用在 `request.ts:65`），反向表再映回来（`cosy.ts:144-156`，用在 `models.ts:198`）。**正向表不是单射**：`qwen3.7-plus` 与 `qwen3.6-plus` 都 → `qmodel`；`glm-5.2` 与 `glm-5.1` 都 → `gm51model`；`minimax-m2.7` 与 `minimax-m3` 都 → `mmodel`。反向表每组只给一个（`qmodel`→`qwen3.7-plus`、`gm51model`→`glm-5.2`、`mmodel`→`minimax-m2.7`），**于是选 `qwen3.6-plus` / `glm-5.1` / `minimax-m3` 实际打到的是另一个模型，界面上毫无提示**。反向表还把 `q36fmodel` 与 `qfmodel` 都映到 `qwen3.6-flash`（`cosy.ts:149-150`），目录里同时出现两者时 `models.ts:200-201` 的 `configs[modelInfo.id]` 会互相覆盖、`models.ts:203` 还会 push 两个同 id 的模型 | `JS:105961`、`JS:117860` vs `cosy.ts:123-156`、`models.ts:198-215`、`request.ts:65`；`cosy.test.ts:getQoderCNDirectModel:"maps known model IDs to internal keys"` 把三组碰撞逐条钉住了；`cosy.test.ts:getQoderCNFriendlyModelInfo:"returns known friendly info for mapped keys"` 是反向表 | 中 | 必须对齐（静默换模型是实质问题。正确做法是不改写 key、用服务端下发的 `key` 当模型 id，只在展示名上做本地美化） |
+| 56 | 6 | CN 静态目录兜底 | 没有静态目录：目录解析不出可用条目就返回 false / 空数组（`JS:105969`、`JS:117854`），客户端此时就是没有模型 | 内置 CN 静态模型表与一份 17 项的 reasoning key 集合（friendly id 与服务端 key 混在一起），`max_output_tokens` 兜底 32768（`models.ts:48`、`models.ts:62-88`、`models-static.ts` 的 `staticCnModels`） | `JS:105969`、`JS:117854` vs `models.ts:48-88`、`index.ts:26-37` | 低 | 不能对齐（`registerProvider` 要求**同步**给出模型表（`index.ts:26-37`、`index.ts:62`），目录刷新是异步的，所以 omp 侧必须有一份离线兜底；官方 CLI 可以"暂时没有模型"，omp 不行） |
+
+#### 面 6 未覆盖
+
+- **CN 版在签名、请求头、模型 key 上是否真有差异**。本轮只有全球版 1.1.23 的取证物，CN 版（`qoderclicn`）的 bundle 没有提取，所以这个问题**无法回答**——上面第 55 行讲的是插件侧的映射层，不是官方 CN 协议。能定论的观察只有一个：对一份 CN 安装跑 `npm run audit:extract`，再用同一套预言机比对 `authRequest` / `inferRequest` 的 URL、头集与签名载荷。在拿到那份取证物之前，任何"CN 只是换域名"的说法都是推断。
+- **`gateway.qoder.com.cn` 这个域名的来源**。它在官方全球版 bundle 里 0 命中，插件是从哪里得到它的本轮没有回溯到（可能来自 CN 版、也可能来自旧版本或抓包）。
+- **CN 的 center 与 gateway 是否真是同一个域名**。插件让 `getQoderBaseUrl` 与 `getQoderCenterUrl` 在 CN 下都指向 `gateway.qoder.com.cn`（`cosy.ts:84`、`cosy.ts:92`），全球版则是两个不同域名（`api3.qoder.sh` 与 `center.qoder.sh`）。官方的端点发现把 center 与 inference 当两张独立的表（`JS:77042-77045`），所以 CN 下二者合一这件事需要 CN 侧取证才能确认。
+- **VPC 部署**。官方支持 `<name>.vpc.qoder.com.cn` 形式的私有部署端点（`JS:68043`、`JS:293194`）。omp 侧没有对应概念，本轮没有比对。
+
 ## 已验证一致
 
 这一节和差异表同等重要：**它划定第二阶段不要再去动的范围。** 每行都指到一个当前为绿的用例，
@@ -152,7 +239,7 @@ messages, tools, parameters, chat_context, model_config, business`
 | `Authorization` 载荷结构 | `Bearer COSY.<payloadB64>.<md5>`（`cosy.ts:336`），载荷五键 `{version:"v1", requestId, info, cosyVersion, ideVersion:""}`，`version` 为 `v1`、`ideVersion` 为空串（`cosy.ts:314-320`）。**只有键与这两个常量一致**，`cosyVersion` 的值见差异第 2 行 | `锁定:"builds the same Authorization payload shape"`；`预言机:"replays the credential-supplied user info and key verbatim"` |
 | infer（chat）URL | `https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`，全串一致（`cosy.ts:103-105`） | `锁定:"matches the official infer URL"`（对 `V.inferRequest.url`）；`预言机:"emits the business identity headers on the infer request"` |
 | `Cosy-Data-Policy` | 头名与大小写一致（它不出现在三个已知差异数组里，即已被三条锁定用例共同排除）。值 `disagree` 也一致——这一半是 `V.inferRequest.headers["Cosy-Data-Policy"]` 与 `cosy.ts:18` 的字面对照，没有单独用例 | `锁定:"still misses exactly these official headers"` + `"still sends exactly these headers the official client does not"` + `"still spells these headers with different casing than the official client"` |
-| 请求体混淆编码 | `qoder-encoding.ts` 与 WASM 输出**逐字节相同**，覆盖 64 B JSON、1008 B、`{}`、含中文与 emoji 四组输入 | `锁定:"matches the wasm output byte for byte (case 0..3)"`（四条）；`预言机:"obfuscates the infer body inside the wasm"`（另钉住 `4*ceil(n/3)` 的长度关系） |
+| 请求体混淆编码 | `qoder-encoding.ts` 与 WASM 输出**逐字节相同**，覆盖 64 B JSON、1008 B、`{}`、含中文与 emoji 四组输入 | `锁定:"matches the wasm output byte for byte (case %i)"`（`it.each` 模板，`src/__tests__/cosy-oracle-vectors.test.ts:58`；渲染成 case 0…3 四条。**grep 要用 `%i` 这个字面量**，Task 7 原先写的 `(case 0..3)` 在仓库里搜不到）；`预言机:"obfuscates the infer body inside the wasm"`（另钉住 `4*ceil(n/3)` 的长度关系） |
 | infer 传输头 | `Content-Type: application/json`、`Accept: text/event-stream`、`Cache-Control: no-cache`、`X-Model-Key`、`X-Model-Source` 五个头名与大小写一致（`transport.ts:201-209`）。**必须按最终 `fetch` 的合并结果比对**：这五个里有三个只在 `transport.ts` 出现，只读 `cosy.ts` 会误判成缺失 | 同上三条锁定用例（五者均未落入 missing/extra/casing 任一数组）；`预言机:"emits the business identity headers on the infer request"` 断言 `X-Model-Key`/`X-Model-Source` 的值 |
 | 大小写正确的 COSY 头名 | `Authorization`、`Cosy-Key`、`Cosy-User`、`Cosy-Date`、`Cosy-Version`、`Cosy-Data-Policy`、`Login-Version` 七个头名与官方逐字符一致（`cosy.ts:336-353`） | 同上三条锁定用例 |
 
@@ -171,3 +258,96 @@ messages, tools, parameters, chat_context, model_config, business`
 | `business` 字段名 | 七键 `{product, version, type, stage, id, name, begin_at}` 与 `proto:193-202` 的 `BusinessMetadata` 逐名对应，只少一个可选的 `sub_task` | `键集:"sends exactly these business keys, in this order"` |
 | system prompt 的位置 | 官方同样把 system prompt unshift 成 `messages[0]` 的 `{role:"system", content}`（`JS:132108`），与 `request.ts:197` 一致。`request.ts:193-195` 那条注释的做法是对的——**第二阶段不要把它"修"回顶层 `system` 独占**，顶层 `system` 该补的值见差异第 18 行 | `键集:"keeps the top-level shape when a system prompt is present"` |
 | `tools` 元素形状 | `{type:"function", function:{name, description, parameters}}` 的键与键序一致于 OpenAI 约定，`function` 的三个键与 `proto:127-132` 的 `Function` 同名 | `键集:"sends exactly these tools element keys, in this order"`；`键集:"sends exactly these tools element function keys, in this order"`；`键集:"keeps the top-level shape when tools are present"` |
+
+### 面 3：响应流解析
+
+| 项 | 结论 | 验证用例 |
+| --- | --- | --- |
+| usage 四个字段的取名 | `prompt_tokens` / `completion_tokens` / `total_tokens` / `prompt_tokens_details.cached_tokens` 与官方 `LS` 读的是同一批字段名（`JS:132903`），且两侧都不把 `cacheable_tokens` 当写入量 | `src/__tests__/events.test.ts:"subtracts cached and written tokens from prompt_tokens"` / `"ignores cacheable_tokens, which is a capacity metric not a write count"` / `"defaults every absent field to zero"` / `"never reports negative input when the cache counts exceed prompt_tokens"` |
+| `finish_reason` 六个取值的归类 | `stop` / `end_turn` → 正常结束、`length` / `max_tokens` → 长度截断、`tool_calls` / `function_call` → 工具调用，与官方 `GcA`（`JS:132826-132834`）分类一致；而且是显式映射不是 cast（`content_filter` 与未知值的差异见差异第 35 行） | `stream.test.ts:"translates finish_reason instead of passing the upstream vocabulary through"` / `"preserves finish_reason=length instead of overwriting to stop"` / `"emits a done event with reason=length when finish_reason is length"` / `"maps an unrecognised finish_reason to stop"` |
+| `[DONE]` 的两种形式与终止后丢弃 | 裸 `[DONE]` 与包在 `{body:"[DONE]"}` 里的形式两侧都识别（官方 `JS:133136`、`JS:132807-132808`；插件 `events.ts:113`、`events.ts:122`），且都在此处停止消费、丢弃其后 payload（官方 `break`，插件 `stream.ts:105-113`） | `stream.test.ts:"finishes on [DONE] without waiting for the server to close the socket"` / `"stops consuming payloads that follow the wrapped [DONE] in the same chunk"` / `"stops consuming payloads that follow a bare data: [DONE] line"` |
+| 错误包络终结整轮而不是静默停止 | `statusCodeValue !== 200` 的包络两侧都变成一次真错误（官方 `JS:132794-132805` 抛带 status 的 Error；插件 `events.ts:117-119` → `stream.ts:118-124` 的 `stopReason:"error"` + `error` 事件）。**分类的差异见差异第 34 行**，这里只确认"不会被吞掉" | `stream.test.ts:"surfaces an upstream 406 'Session blocked' as an error event, not a silent stop"` |
+| 工具调用分片的组装语义 | `index` 定位、id/name 后到也能补上、参数分片累加、块在调用**可识别**时就开——与官方 `JS:133195-133213` 的 wireIndex→internalIndex 映射同语义（官方多一层块序号偏移，因为它输出 Anthropic 形状的块流） | `stream.test.ts:"reports a tool_use stop reason when the stream emits tool calls"` / `"emits a tool call that arrives with no arguments"` / `"picks up an id and name that arrive after the block is open"` / `"does not claim toolUse when no tool call reached the message"` |
+| 跨 chunk 的残余重组 | 两侧都把不完整的尾行留到下一个 chunk（官方 `JS:132670-132675` 留 `K`/`S`；插件 `sse.ts:45` 返回 `rest`），不会把半条 payload 交给解析 | `sse.test.ts:"reassembles a payload that was cut across chunks"` / `"keeps an incomplete trailing line in rest"` / `"returns the whole buffer as rest when there is no line break yet"`；`sse.test.ts` 的 `describe("splitSSEData threads rest across chunks like the pre-optimisation implementation")` 全套 |
+| 坏行不杀流 | 单条解析失败只跳过该行（官方 `JS:133152-133155` 计数并 warn；插件 `events.ts:145-150` 在 `QODER_DEBUG` 下打印），两侧都不因此中断整流 | `stream.test.ts:"parses a successful SSE stream into text + stop"`（正常路径）+ 差异第 33 行记的静默跳过就是这条机制的副作用 |
+
+### 面 4：模型目录与配额
+
+| 项 | 结论 | 验证用例 |
+| --- | --- | --- |
+| 配置 scene 是 `assistant` | 官方 `gU = getClientMetadata().scene`，默认值 `"assistant"`（`JS:106064`、`JS:400-402`、`JS:404`）；插件优先取 `assistant`（`models.ts:173`）。**退到 `chat` 的行为见差异第 41 行** | `models-cache.test.ts:"prefers the assistant scene over chat (qodercli default scene)"` |
+| `enable` 的判定 | 官方 `enable !== false && enable !== 0`（`JS:105961`），插件同一条件（`models.ts:181`）：缺 `enable` 字段的条目（dogfood / crit 模型）两侧都保留，显式 `false` 或 `0` 两侧都丢 | `models-cache.test.ts:"keeps entries without an explicit enable flag (dogfood/crit models)"` / `"keeps only enabled service models without adding auto as a fallback"` / `"keeps the Cantus model returned by the current catalog"` / `"filters auto from a legacy fallback cache when the service did not enable it"` |
+| 目录条目原样回传 | 插件不解析的目录字段（`strategies` / `promotion` / `price_factor` / `feature_switches` …）仍然整体留在缓存的 `configs` 里并原样回传成 `model_config`（`models.ts:200`、`request.ts:215`），**不构成字段丢失**（见差异第 42 行） | `键集:"sends the cached model config through as model_config, key first"`；`键集:"appends key to the end when the cached config does not have one"` |
+| `/api/v2/quota/usage` 是官方同一个端点 | 官方 `fetchQuotaUsage` 打的就是 `<openapi>/api/v2/quota/usage`（`JS:117930`），插件同（`cosy.ts:115-117`）。**响应不解密的差异见差异第 40 行** | `cosy.test.ts:getQoderUsageURL:"constructs correct URL"` |
+
+### 面 5：认证与身份
+
+| 项 | 结论 | 验证用例 |
+| --- | --- | --- |
+| PAT 交换端点与请求体 | `POST <openapi>/api/v1/jobToken/exchange`，体 `{personal_token}`——官方 `JS:114977`、插件 `cosy.ts:107-109` + `pat.ts:57-68`，端点、方法、体的键名逐字一致 | `cosy.test.ts:getQoderExchangeURL:"constructs correct global URL"` / `cosy.test.ts:getQoderExchangeURL:"constructs correct CN URL"`（**注意**：同名的两条在 `getQoderModelListURL` 那个 describe 下，是 Global Constraints 里记的已知红灯，别搞混）|
+| userinfo 端点与鉴权方式 | `GET <openapi>/api/v1/userinfo` + `Authorization: Bearer <jobToken>`——官方 `JS:114998`、插件 `cosy.ts:111-113` + `pat.ts:108-116`。**响应字段读得少的差异见差异第 49 行** | `cosy.test.ts:getQoderUserInfoURL:"constructs correct URL"` |
+| PAT 过期后的刷新策略 | 官方 `refreshStrategy: "pat"` 就是重跑 `loginWithPAT`（即重新交换 PAT，`JS:114654`、`JS:115115-115120`），不用 `refresh_token`；插件同样重新 `credentialsFromPat`（`oauth.ts:196-208`） | `oauth.test.ts:"re-exchanges an environment PAT even when a credential is already stored"` |
+| machine id 的首选来源 | 两侧都以 `~/.qoder/.auth/machine_id` 为第一来源（官方 `JS:76506`，插件 `cosy.ts:269` 的第一个路径），所以装了 Qoder IDE 的机器上设备指纹天然一致。**推导与落盘的差异见差异第 51 行** | `identity.test.ts:"only the signing path resolves machineID"` |
+| 凭据里 userID / machineID 的恢复 | omp 只持久化 access / refresh / expires / email，插件把 userID 与 machineID 编进 refresh 串尾再回读，OAuth 与 PAT 两种布局都覆盖（`oauth.ts:61-69`、`pat.ts:30-48`） | `identity.test.ts:"recovers userID and machineID from the refresh string omp cannot strip"` / `"recovers identity from a PAT refresh string too"`；`pat.test.ts:"encodes and decodes correctly"` / `"handles empty fields"` |
+
+### 面 6：CN 版差异
+
+| 项 | 结论 | 验证用例 |
+| --- | --- | --- |
+| 签名与请求头没有 CN 分支 | `buildAuthHeaders`（`cosy.ts:287-356`）与 `computeCosySignature`（`cosy.ts:244-263`）都不接受 mode 参数，两个模式共用同一条签名与请求头路径；全仓 `isQoderCNMode` 的分支只落在域名、本地文件名、provider id 与展示名、登录文案、CN 静态目录、模型 key 映射六处 | `src/__tests__/cosy-signature.test.ts:"md5s payload, key, timestamp, body and sigPath joined by newlines"`（签名只吃五个参数，没有 mode）；`锁定:"reproduces the official md5 signature"` |
+| CN 的三个域名 | gateway 与 center 都是 `gateway.qoder.com.cn`、openapi 是 `openapi.qoder.com.cn`（`cosy.ts:84`、`cosy.ts:88`、`cosy.ts:92`）。`openapi.qoder.com.cn` 在官方 bundle 里也出现（`JS:119730`，内置 Config SDK 的端点表），可作交叉印证；**gateway 与 center 合一是否正确见面 6 未覆盖** | `cosy.test.ts:getQoderBaseUrl:"returns CN URL for cn mode"` / `getQoderOpenApiUrl:"returns CN URL for cn mode"` / `getQoderCenterUrl:"returns CN URL for cn mode"` |
+| CN 的 PAT 与 userinfo 端点 | CN 模式下同样走 `/api/v1/jobToken/exchange` 与 `/api/v1/userinfo`，只是域名换成 `openapi.qoder.com.cn`（`cosy.ts:107-113`） | `cosy.test.ts:getQoderExchangeURL:"constructs correct CN URL"` |
+
+## 收尾：条数统计与第二阶段入口顺序
+
+**行号是稳定标识，故意不重排。**本文件多处按行号交叉引用（"见差异第 2 行"、"与第 19 行一并处理"、"见差异第 49 行"…），一旦按风险重排就会把这些引用全部悄悄指错。所以下面用**分组列出行号**的方式给出入口顺序，行号本身保持不变。
+
+### 按风险分级
+
+| 风险 | 条数 | 行号 |
+| --- | --- | --- |
+| 高 | 6 | 1、2、3、4、5、7 |
+| 中 | 32 | 6、8、9、10、13、14、15、16、17、18、19、20、21、24、25、32、33、34、35、36、38、40、41、44、47、49、50、51、52、53、54、55 |
+| 低 | 18 | 11、12、22、23、26、27、28、29、30、31、37、39、42、43、45、46、48、56 |
+| **合计** | **56** | |
+
+### 按判定分类
+
+| 判定 | 条数 | 行号 |
+| --- | --- | --- |
+| 必须对齐 | 45 | 1、2、3、4、5、6、7、8、9、10、11、12、13、14、15、16、17、18、19、20、21、22、24、25、26、29、32、33、34、35、36、37、38、39、40、41、44、47、49、50、51、52、53、54、55 |
+| 无需对齐 | 9 | 23、27、28、30、42、43、45、46、48 |
+| 不能对齐 | 2 | 31、56 |
+| **合计** | **56** | |
+
+### 按面分布
+
+| 面 | 行号区间 | 条数 |
+| --- | --- | --- |
+| 1 传输层指纹 | 1–15 | 15 |
+| 2 请求体构造 | 16–31 | 16 |
+| 3 响应流解析 | 32–40 | 9 |
+| 4 模型目录与配额 | 41–46 | 6 |
+| 5 认证与身份 | 47–53 | 7 |
+| 6 CN 版差异 | 54–56 | 3 |
+
+### 第二阶段入口顺序
+
+要做的只有 `必须对齐` 那 45 条（`无需对齐` 9 条与 `不能对齐` 2 条不产生工作量，但**同样要读**——它们和「已验证一致」一起划定了不要去动的范围）。按风险降序：
+
+1. **高风险 6 条：1、2、3、4、5、7。**全部在面 1，全部是纯 bug，全部有锁定用例或向量直接对照。第 1 行修 `cosy.ts:95-101` 就能让 `src/__tests__/cosy.test.ts` 两条已知红灯转绿。第 2、3、4、5、7 行是同一片代码（`cosy.ts:16`、`cosy.ts:336-356`），建议一次改完再跑锁定套件——那三条锁定用例是按"缺失/多发/大小写"三个数组断言的，改一半会让它们从一种红变成另一种红。
+2. **中风险 32 条。**按依赖关系分四组：
+   - **面 1 剩余（6、8、9、10、13、15）** 与上一步同一片代码，顺路做完。第 15 行（端点发现）做完，第 54 行的 region 问题自动消失。
+   - **身份链（14、47、49、50、51）** 必须按 49 → 14 → 50 的顺序：先让 `pat.ts:118-126` 读到 `organization_id` / `organization_tags`，才有东西喂给第 14 行的新明文；第 50 行是把这对值的生命周期从"每请求"改成"每凭据"，依赖第 14 行先定下明文形状。第 47、51 行独立。
+   - **面 2（16、17、18、19、20、21、24、25）** 全在 `request.ts` 与 `transform.ts`，`键集:` 那套用例会逐键报错，可以一条一条推。第 24 行要先做，第 39 行才能做（见第 39 行的判定）。
+   - **面 3、4、6（32、33、34、35、36、38、40、41、44、52、53、55）** 第 32 行（按事件块分帧）是第 33、34 行的前置——不先把 `event:` 收回来，第 34 行的豁免逻辑无处可写。第 40 行（响应解密）零风险且独立，可以最先做。
+3. **低风险且必须对齐 7 条：11、12、22、26、29、37、39。**第 39 行有次序依赖（第 24 行之后），其余随手可做。
+
+**唯一一条建议插队到最前面的是第 40 行（响应解密）**：它对明文恒等，今天零行为变化，改动面只有 `models.ts:166` 与 `usage.ts:50` 两处，却把"服务端改成编码返回"这个随时可能发生的事从"满屏乱码"变成"无事发生"。
+
+### 本轮遗留的两处待改
+
+都不在本文件范围内，记在这里免得丢：
+
+- `scripts/cosy-oracle.mjs:31` 的注释断言 `encrypt_user_info` 与 `key` 来自登录响应，已被差异第 14 行的实测推翻。
+- `scripts/carve-glue.mjs` 的导出清单没带出 wasm-bindgen 模块命名空间，所以 `generate_runtime_auth_fields` 这类导出目前只能靠临时改一份 glue 副本来调。要把差异第 14 行的实测固化成预言机用例，得先加这一项。
