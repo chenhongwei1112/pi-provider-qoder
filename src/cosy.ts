@@ -225,13 +225,41 @@ function aesEncryptCBCBase64(plaintext: string, keyStr: string): string {
   return encrypted;
 }
 
-function computeSigPath(urlStr: string): string {
+export function computeSigPath(urlStr: string): string {
   const parsed = new URL(urlStr);
   let sigPath = parsed.pathname;
   if (sigPath.startsWith("/algo")) {
     sigPath = sigPath.substring("/algo".length);
   }
   return sigPath;
+}
+
+/**
+ * COSY 签名：md5(payloadB64 \n cosyKey \n timestamp \n body \n sigPath)。
+ * 已用官方 WASM 逐字节验证（见 scripts/cosy-oracle.mjs）。
+ *
+ * 分段喂给 md5 而不是拼成一个字符串：body 是编码后的请求体，长对话下可达
+ * 几百 KB，模板字符串会把它多拷两遍。
+ */
+export function computeCosySignature(
+  payloadB64: string,
+  cosyKey: string,
+  timestamp: string,
+  body: Buffer | string | null,
+  sigPath: string,
+): string {
+  return crypto
+    .createHash("md5")
+    .update(payloadB64)
+    .update("\n")
+    .update(cosyKey)
+    .update("\n")
+    .update(timestamp)
+    .update("\n")
+    .update(body ?? "")
+    .update("\n")
+    .update(sigPath)
+    .digest("hex");
 }
 
 export function getMachineId(): string {
@@ -294,21 +322,7 @@ export function buildAuthHeaders(
   const payloadB64 = Buffer.from(JSON.stringify(cosyPayload)).toString("base64");
   const sigPath = computeSigPath(requestURL);
 
-  // Fed to md5 in segments rather than concatenated into one string: the body
-  // is the encoded request payload, which reaches hundreds of KB on a long
-  // conversation, and `${...}` would copy it twice per request.
-  const sig = crypto
-    .createHash("md5")
-    .update(payloadB64)
-    .update("\n")
-    .update(cosyKey)
-    .update("\n")
-    .update(timestamp)
-    .update("\n")
-    .update(body ?? "")
-    .update("\n")
-    .update(sigPath)
-    .digest("hex");
+  const sig = computeCosySignature(payloadB64, cosyKey, timestamp, body, sigPath);
 
   const bodyHash = crypto
     .createHash("md5")
