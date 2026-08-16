@@ -155,7 +155,7 @@ messages, tools, parameters, chat_context, model_config, business`
 | 37 | 3 | 遗留 `function_call` 分片 | 收到 `delta.function_call` 且没有 `tool_calls` 时，就地合成一条 `tool_calls[0]`（首片带 `fc_<messageId>_<index>` 形式的 id，后续片只带 arguments），再走统一路径（`JS:133166-133171`） | `QoderDelta` 里没有这个字段（`events.ts:19-28`），整条分片被忽略。**已修**：`function_call && !tool_calls` 时就地合成 `tool_calls[0]`，首片带 id、后续片只带 arguments | `JS:133166-133171` vs `events.ts:19-28`、`events.ts:155-283` | 低 | 必须对齐 |
 | 38 | 3 | 工具调用流的容错 | 参数 JSON 截断时做修复：抽出补全后缀并再发一段 `input_json_delta`（`JS:133237-133239`），插入内容前先关掉未完成的工具块（`JS:133088-133095`），孤儿分片（有 arguments 无对应 index）抛 `MalformedToolCallStreamError`（`JS:133072`、`JS:133206`）；声明了 `tool_calls` 却没有块时只打 warn 并**保留** `tool_use`（`JS:133220`） | 参数解析不了就静默当 `{}`（`events.ts:323-326`）——半截 JSON 直接变成空参数调用；孤儿分片被 `state.contentIndex` 默认 0 的保护挡住但不报错（`events.ts:265-281`）；声明了 `tool_calls` 却没有块时**抛硬错**（`events.ts:346-354`）。**已修（JSON 修复这半）**：截断参数先按未闭合的括号/引号补全再解析，修不好则抛错并带前若干字符 —— 这比原先静默当 `{}` 更严，也比官方的 `"{}"` 兜底更严，理由是空参数工具调用比失败更危险 | `JS:133072`、`JS:133088-133095`、`JS:133206`、`JS:133220`、`JS:133237-133239` vs `events.ts:265-281`、`events.ts:320-341`、`events.ts:343-354` | 中 | 必须对齐（**只指 JSON 修复这半**。抛硬错那半是插件有意选择，理由写在 `events.ts:343-354`，比官方的"保留 tool_use 但没有工具"更安全，保留） |
 | 39 | 3 | `<thinking>` 字面标签 | 流里**不做任何标签解析**：`l.content` 直接变 `text_delta`（`JS:133184-133187`），thinking 只来自第 36 行那三条结构化通道。整个 bundle 里 `<thinking>` 字面量 0 命中（字符串搜索，仅作旁证，结论以 `JS:133184-133187` 的正读为准） | ~~对 `content` 跑 `ThinkingTagParser`，还要在 `reasoning_content` 上剥标签~~ **已修**：解析器与 `thinking-parser.ts` 整个删除，`content` 原样成为 text delta。**前置条件已满足**（第 24 行先落地，thinking 不再内联），且**取证到了台账原先拿不到的样本**：真实网关约 2 万字符推理响应里字面 `<thinking>` 零命中（`scripts/live-alignment-check.ts:"the real gateway never emits a literal <thinking> tag"`）。不保留作为兜底，因为它同样会改写正当提到该标签的文本 | `JS:133184-133187`、`JS:133100-133122` vs `events.ts:155-212` | 低 | 必须对齐（**次序依赖差异第 24 行**：标签是插件自己把 thinking 内联进回传 `content`（`transform.ts:143-144`）教出来的，先修第 24 行再拆解析器；顺序颠倒会当场回归，`stream.test.ts:"keeps tool call arguments intact when a <thinking> tag leaks into content"` 就是为此存在的） |
-| 40 | 3 | 响应解密 | 非流式 JSON 一律过 `decrypt_server_response`：目录缓存（`JS:105922`）、`listModelsFromRemote`（`JS:117849`）、`/api/v3/user/status`（`JS:117916`）、`/api/v2/quota/usage`（`JS:117937`）；封装 `JS:1028-1034` 在 WASM 抛异常时原样返回入参，`JS:1035-1038` 再 `JSON.parse`。SSE 流不解密 | 一处都不解密：`grep -i decrypt src/` **零命中**；目录走 `response.json()`（`models.ts:166`），配额走 `response.json()`（`usage.ts:50`） | **本轮实测**（加载官方 WASM 直接调 `decryptServerResponse`）：① 它是请求体混淆的**精确逆运算**——把 `{"hello":"world","n":42}`、`{"assistant":[{"key":"auto"}]}`、`{}` 用 `qoder-encoding.ts` 编码后喂进去，逐字返回原串；② 对明文是**恒等**——`{"a":1}`、`{"json":true}`、`""`、`{"assistant":[]}`、`not json at all` 全部原样返回。官方之所以敢无条件调用，正是因为它对明文是直通。`JS:105922`、`JS:117849`、`JS:117916`、`JS:117937`、`JS:1028-1038` vs `models.ts:166`、`usage.ts:50` | 中 | 必须对齐。插件今天能跑，说明服务端对它的请求**当前**返回明文——这是对当下服务端行为的观察，不是保证。注意插件的 chat URL 是带 `Encode=1` 的（`cosy.ts:104`），可见这个 flag today 并不单独决定响应是否编码；`Encode=1` 究竟控制什么本轮没测，不要据此推论。因为该函数对明文恒等，**加上它严格优于不加**：今天零行为变化，服务端哪天改成编码返回，区别就是优雅处理与满屏乱码 |
+| 40 | 3 | 响应解密 | 非流式 JSON 一律过 `decrypt_server_response`：目录缓存（`JS:105922`）、`listModelsFromRemote`（`JS:117849`）、`/api/v3/user/status`（`JS:117916`）、`/api/v2/quota/usage`（`JS:117937`）；封装 `JS:1028-1034` 在 WASM 抛异常时原样返回入参，`JS:1035-1038` 再 `JSON.parse`。SSE 流不解密 | ~~一处都不解密~~ **已修**（第二阶段第一批）：新增 `qoder-encoding.ts` 的 `qoderDecodeBody` / `parseQoderJsonBody`（旋转步骤是对合，逆运算＝反替换＋同互换），目录与配额两处都改走它 | **本轮实测**（加载官方 WASM 直接调 `decryptServerResponse`）：① 它是请求体混淆的**精确逆运算**——把 `{"hello":"world","n":42}`、`{"assistant":[{"key":"auto"}]}`、`{}` 用 `qoder-encoding.ts` 编码后喂进去，逐字返回原串；② 对明文是**恒等**——`{"a":1}`、`{"json":true}`、`""`、`{"assistant":[]}`、`not json at all` 全部原样返回。官方之所以敢无条件调用，正是因为它对明文是直通。`JS:105922`、`JS:117849`、`JS:117916`、`JS:117937`、`JS:1028-1038` vs `models.ts:166`、`usage.ts:50` | 中 | 必须对齐。插件今天能跑，说明服务端对它的请求**当前**返回明文——这是对当下服务端行为的观察，不是保证。注意插件的 chat URL 是带 `Encode=1` 的（`cosy.ts:104`），可见这个 flag today 并不单独决定响应是否编码；`Encode=1` 究竟控制什么本轮没测，不要据此推论。因为该函数对明文恒等，**加上它严格优于不加**：今天零行为变化，服务端哪天改成编码返回，区别就是优雅处理与满屏乱码 |
 
 #### 面 3 未覆盖
 
@@ -385,7 +385,6 @@ messages, tools, parameters, chat_context, model_config, business`
 | 14 | `info` 明文改成官方四字段，token / name / email 不再进加密载荷 | 用长度反证明文形状（token 加长 400 字节而 info 不变）；**真实网关 200** |
 
 面 1 只剩第 15 行（端点动态发现）未做——它是一个独立特性，不属于头部这批。
-第 49 行只改了一半（uid 与 name 的别名），组织字段那半与第 14 行一并挂起。
 
 **第 14 行已完成并通过真实网关验证。**它原本是这批里唯一无法离线举证的一条：预言机只能证明加密形状，
 证明不了服务端解密后读哪些字段，而官方明文里没有 `security_oauth_token`，官方又走另一条登录路径，
@@ -423,8 +422,6 @@ user-info，而官方交给 `createContext` 的是六段（`JS:114847`）。补�
 **真实网关端到端已验证**，这是面 3 最强的一档证据：`scripts/live-alignment-check.ts` 的 chat 步现在把服务端字节同时喂给生产的 `SSEFramer` + `QoderEventTranslator`。实测 102 个网络分片 → **58 个事件块** → `thinking_start` + 多条 `thinking_delta` → 文本 `"ok"`、`stopReason=stop`、`terminated=true`。单元测试里的 SSE 都是手写的，只有这一条路径上的帧是服务端真发的。
 
 另有一条组合冒烟（`stream.test.ts` 的 `"face 3 alignment, end to end"`）把六条新行为叠进一条流走真实 `streamQoder`：注释行 + `event:`/`id:` + 心跳空行 + 额度通知 + 两个配额哨兵 + `reasoning_item` + `signature` + 截断的 `function_call`。它防的是**并发编辑把某个调用点悄悄丢掉**，而不是各条语义本身。
-
-第 39 行（`<thinking>` 字面标签）仍未做：它依赖面 2 第 24 行，顺序颠倒会当场回归。
 
 ### 第二阶段第三批：面 2 请求体构造 11 条 + 面 3 收尾第 39 行
 
