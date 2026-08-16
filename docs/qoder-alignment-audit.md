@@ -177,7 +177,7 @@ messages, tools, parameters, chat_context, model_config, business`
 
 #### 面 4 未覆盖
 
-- **目录响应的实际 scene 集合**。`parseModelList` 遍历所有 scene，但本轮没有一份真实的 `model/list` 响应正文（向量只冻结了请求侧），所以"`assistant` 之外还有哪些 scene、`byok_enterprise` 是否真的出现"无从确认。`cosy.ts:96-99` 那段注释提到的 38 个跨场景条目属于同一笔账。
+- ~~**目录响应的实际 scene 集合**无从确认~~ —— **已实测**（`npx tsx scripts/live-alignment-check.ts`，真实 `model/list` 200 响应 65458 字节）：响应里有 **10 个 scene**，依次为 `chat`、`assistant`、`inline`、`quest`、`nap`、`qwork`、`experts`、`qwake`、`byok_teams`、`byok_enterprise`。**`byok_enterprise` 确实出现**，所以第 41 行讲的"官方还会并入 `byok_enterprise` 那一档"不是纸面推断。`assistant` 一档 16 条 —— 插件只取这一档，官方跨 scene 合并后条目更多，这正是第 41 行的工作量。另：服务端对该请求返回的是**明文**，所以第 40 行的解码在今天是直通。
 - **`strategies` 的灰度语义**。官方把它解析成 `{tag, enabled, disabled_message_key}`（`JS:105516-105524`）并 debug 打印每个条目的 `strategies`（`JS:105960`），但用它做什么判断本轮没有回溯到。
 - **`price_factor` 与 `ZERO_COST`**。插件把所有模型的 cost 写成 `ZERO_COST`（`models.ts:212`）。官方拿 `price_factor` 做计费展示。是否有服务端可观测的后果不明，故不列为差异行。
 
@@ -345,9 +345,19 @@ messages, tools, parameters, chat_context, model_config, business`
 
 **唯一一条建议插队到最前面的是第 40 行（响应解密）**：它对明文恒等，今天零行为变化，改动面只有 `models.ts:166` 与 `usage.ts:50` 两处，却把"服务端改成编码返回"这个随时可能发生的事从"满屏乱码"变成"无事发生"。
 
-### 第二阶段第一批：已改 15 条，待真实请求验证
+### 第二阶段第一批：已改 15 条，**真实网关已验证通过**
 
 `npm test` 359 条全绿、`npm run audit:oracle` 10 条全绿、`npm run lint` 干净、`npm run build` 通过。
+
+**真实网关验证**（`npx tsx scripts/live-alignment-check.ts`，8/8 通过）：
+- PAT 重新交换拿到新 token，`userID` 非空 —— 第 49 行的别名改动没有破坏登录链
+- `model/list` **200**（65458 字节），auth 类的 19 个头被接受
+- `quota/usage` 正常解出 10 个字段
+- `agent_chat_generation` **200 并成功流式返回**（13 个分片 / 4117 字符），infer 类的 22 个头被接受
+- `Cosy-MachineHostname` 实发 `foot01-s3dev-pod001`（本机主机名 header-safe，走原样透传那条分支）
+- 同凭据两次 `buildAuthHeaders` 的 `Cosy-Key` 相同，第 50 行的回放行为在真实调用里成立
+
+也就是说：**升到 1.1.23、改五个头名的大小写、补三个业务标识头、删三个签名辅助头、删组织头与 `X-Request-Id`、按请求类拆分 `Cosy-ClientIp` / `Accept-Encoding`、补 `Connection` 与 `Cosy-MachineHostname`，服务端全部接受，没有 401/403。**
 
 **面 1 的请求头现在与官方逐个头名、逐个大小写一致，两个请求类都对齐了。**锁定套件的
 `missing` 数组在 auth 与 infer 两类下都是空数组，`extra` 在 auth 下是空数组、在 infer 下只剩
