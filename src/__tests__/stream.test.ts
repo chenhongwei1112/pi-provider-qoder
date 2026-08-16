@@ -437,13 +437,19 @@ describe("streamQoder", () => {
     expect(message).toMatch(/ECONNRESET/);
   });
 
-  it("keeps tool call arguments intact when a <thinking> tag leaks into content", async () => {
-    // Qoder's backend leaks literal thinking tags into the content channel. The
-    // parser used to splice the thinking block in front of the open text block,
-    // renumbering the toolCall block while this function still held the old
-    // index — so the finalizer wrote `arguments` onto the text block and the real
-    // tool call was handed to the agent loop with `{}`. pi persists that message,
-    // so the corruption also went back upstream on the next turn.
+  it("keeps tool call arguments intact when text arrives after the call", async () => {
+    // History: the `ThinkingTagParser` used to splice a thinking block in front of
+    // the open text block on seeing a literal `<thinking>`, renumbering the
+    // toolCall block while this function still held the old index — so the
+    // finalizer wrote `arguments` onto the text block and handed the agent loop a
+    // call with `{}`. pi persists that message, so the corruption travelled
+    // upstream on the next turn too.
+    //
+    // That parser is gone (ledger row 39): official does no tag parsing
+    // (`pretty.mjs:133184-133187`) and a live run found no literal tags. The tag
+    // in this fixture is now ordinary text, and what the case still defends is
+    // block-index integrity when content follows a tool call — the failure mode
+    // was never really about tags.
     const sse =
       sseEnvelope(chunk({ content: "Hello " })) +
       sseEnvelope(

@@ -71,8 +71,7 @@ export function streamQoder(
       let pendingChunk: Uint8Array | undefined = opened.firstChunk;
 
       const decoder = new TextDecoder();
-      const thinkingEnabled = (options?.reasoning as unknown) !== false && (options?.reasoning as unknown) !== "off";
-      const translator = new QoderEventTranslator(output, stream, { thinkingEnabled });
+      const translator = new QoderEventTranslator(output, stream);
 
       stream.push({ type: "start", partial: output });
 

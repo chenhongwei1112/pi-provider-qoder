@@ -45,7 +45,7 @@ function makeTranslator(initialStopReason: AssistantMessage["stopReason"] = "sto
     end: () => {},
     [Symbol.asyncIterator]: function* () {},
   } as unknown as AssistantMessageEventStream;
-  const translator = new QoderEventTranslator(output, stream, { thinkingEnabled: false });
+  const translator = new QoderEventTranslator(output, stream);
   return {
     output,
     events,

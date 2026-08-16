@@ -260,6 +260,17 @@ async function checkChat(creds: Creds) {
   await reader.cancel().catch(() => {});
   record(`chat responded ${res.status} and streamed`, seen.length > 0, `${chunks} 个分片，${seen.length} 字符；首片: ${seen.slice(0, 120).replace(/\n/g, "\\n")}`);
 
+  // 面 3 第 39 行的前提事实：官方对流里的 `content` 不做任何标签解析
+  // （`pretty.mjs:133184-133187`）。插件却维护着一个 ThinkingTagParser。要拆掉它，
+  // 先得确认服务端本身不发字面 `<thinking>` —— 这是台账「面 3 未覆盖」里拿不到样本的那类
+  // 未知量，只能靠真实响应回答。
+  const leakedTags = /<\/?thinking>/.test(seen);
+  record(
+    "the real gateway never emits a literal <thinking> tag",
+    !leakedTags,
+    leakedTags ? `原始响应里出现了字面标签，解析器不能拆` : `${seen.length} 字符原始响应里零命中`,
+  );
+
   // 面 3 第 32/33/34 行：真实帧必须被事件块分帧器认出来，且不能抛。
   record(
     "production SSE framer + translator consume the real gateway stream",

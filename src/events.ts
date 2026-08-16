@@ -6,7 +6,6 @@ import type {
   ToolCall,
 } from "@earendil-works/pi-ai";
 import type { SSEFrame } from "./sse.js";
-import { stripThinkingTags, ThinkingTagParser } from "./thinking-parser.js";
 
 interface ToolCallState {
   arguments: string;
@@ -347,15 +346,11 @@ export class QoderEventTranslator {
   private readonly toolCallsState: ToolCallState[] = [];
   /** Whether this turn already synthesised the opening `function_call` fragment. */
   private synthesizedFunctionCall = false;
-  private readonly thinkingParser: ThinkingTagParser | null;
 
   constructor(
     private readonly output: AssistantMessage,
     private readonly stream: AssistantMessageEventStream,
-    options: { thinkingEnabled: boolean },
-  ) {
-    this.thinkingParser = options.thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
-  }
+  ) {}
 
   /**
    * Feed one SSE event.
@@ -467,13 +462,7 @@ export class QoderEventTranslator {
     // pushed, so there is no numbering to preserve and nothing to replay. This
     // is a difference in event shape, not a missing feature.
     if (delta.reasoning_content) {
-      // Qoder's backend sometimes routes a literal `<thinking>`
-      // opener into reasoning_content (with the matching
-      // `</thinking>` closer landing in the content stream). Strip
-      // tag artifacts so the thinking block stays clean, matching
-      // the SDK's ContentBlock model.
-      const reasoningChunk = stripThinkingTags(delta.reasoning_content);
-      if (reasoningChunk) this.appendThinking(reasoningChunk);
+      this.appendThinking(delta.reasoning_content);
     }
 
     if (delta.reasoning_item) {
@@ -522,27 +511,34 @@ export class QoderEventTranslator {
       block.thinkingSignature = (block.thinkingSignature ?? "") + delta.signature;
     }
 
-    // 2. Process text content
+    // 2. Process text content.
+    //
+    // `pretty.mjs:133184-133187`: official does no tag parsing at all — `content`
+    // becomes a text delta verbatim, and thinking arrives only through the three
+    // structured channels above. The `ThinkingTagParser` this used to run existed
+    // because the plugin inlined thinking as a literal `<thinking>…</thinking>`
+    // into the assistant `content` it sent back (ledger row 24), teaching the
+    // model to keep producing tags. That inlining is gone, and a live run over
+    // ~20k characters of real reasoning-model output found zero literal tags
+    // (`scripts/live-alignment-check.ts:"the real gateway never emits a literal
+    // <thinking> tag"`), so the parser is removed rather than kept as a net that
+    // would also rewrite legitimate text that merely mentions the tag.
     if (delta.content) {
       this.endThinkingBlock();
 
-      if (this.thinkingParser) {
-        this.thinkingParser.processChunk(delta.content);
-      } else {
-        if (this.contentBlockIndex === -1) {
-          this.contentBlockIndex = this.output.content.length;
-          this.output.content.push({ type: "text", text: "" });
-          this.stream.push({ type: "text_start", contentIndex: this.contentBlockIndex, partial: this.output });
-        }
-        const block = this.output.content[this.contentBlockIndex] as TextContent;
-        block.text += delta.content;
-        this.stream.push({
-          type: "text_delta",
-          contentIndex: this.contentBlockIndex,
-          delta: delta.content,
-          partial: this.output,
-        });
+      if (this.contentBlockIndex === -1) {
+        this.contentBlockIndex = this.output.content.length;
+        this.output.content.push({ type: "text", text: "" });
+        this.stream.push({ type: "text_start", contentIndex: this.contentBlockIndex, partial: this.output });
       }
+      const block = this.output.content[this.contentBlockIndex] as TextContent;
+      block.text += delta.content;
+      this.stream.push({
+        type: "text_delta",
+        contentIndex: this.contentBlockIndex,
+        delta: delta.content,
+        partial: this.output,
+      });
     }
 
     // 3. Process tool calls
@@ -725,10 +721,6 @@ export class QoderEventTranslator {
    * Throws when upstream promised tool_calls and sent none.
    */
   finalize(): Extract<AssistantMessage["stopReason"], "stop" | "length" | "toolUse"> {
-    if (this.thinkingParser) {
-      this.thinkingParser.finalize();
-    }
-
     if (this.thinkingBlockIndex !== -1) {
       const block = this.output.content[this.thinkingBlockIndex] as ThinkingContent;
       this.stream.push({
