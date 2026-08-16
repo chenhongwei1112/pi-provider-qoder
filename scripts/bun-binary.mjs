@@ -12,14 +12,14 @@ export function parseBunPayload(buf) {
   if (bundleStart < 0) throw new Error("bun payload: bundle shebang not found");
 
   const firstAnchor = buf.indexOf(NAME_ANCHOR, bundleStart);
-  if (firstAnchor < 0) throw new Error("bun payload: module name region not found");
+  if (firstAnchor < 0) throw new Error("bun payload: module name region not found (expected \\0/$bunfs/root/)");
 
   const modules = [];
   let anchor = firstAnchor;
   while (anchor >= 0) {
     const nameStart = anchor + 1;
     const nameEnd = buf.indexOf(0, nameStart);
-    if (nameEnd < 0) throw new Error("bun payload: unterminated module name");
+    if (nameEnd < 0) throw new Error(`bun payload: unterminated module name (starting at ${nameStart})`);
     modules.push({
       name: buf.toString("utf8", nameStart, nameEnd),
       anchor,
