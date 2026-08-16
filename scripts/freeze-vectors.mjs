@@ -48,10 +48,15 @@ if (!auditDir) throw new Error("freeze: no .qoder-audit/<version>/glue.mjs; run 
 
 const oracle = await createOracle({ auditDir, ...IDENTITY });
 
+// 目录请求是 GET、无请求体。这里显式命名，好让签名向量里的 body 与真正喂给
+// 预言机的输入同源 —— 两处各写一遍的话，将来给 authRequest 加了 body 就会脱钩。
+const CATALOG_BODY = null;
+
 const catalog = oracle.authRequest({
   endpoint: "https://api3.qoder.sh",
   path: "/api/v2/model/list?Encode=1",
   method: "GET",
+  body: CATALOG_BODY,
 });
 const [payloadB64, signature] = catalog.headers.Authorization.replace("Bearer COSY.", "").split(".");
 
@@ -81,7 +86,7 @@ const vectors = {
     payload: JSON.parse(Buffer.from(payloadB64, "base64").toString()),
     cosyKey: catalog.headers["Cosy-Key"],
     timestamp: catalog.headers["Cosy-Date"],
-    body: "",
+    body: CATALOG_BODY ?? "",
     sigPath: "/api/v2/model/list",
     md5: signature,
   },
