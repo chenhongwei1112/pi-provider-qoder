@@ -80,7 +80,7 @@ describe("interactiveLogin device flow", () => {
 
     await expect(interactiveLogin(callbacks, "global")).rejects.toThrow("Login cancelled");
 
-    expect(authUrl).toContain("client_id=e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb");
+    expect(authUrl).toContain(`client_id=${OFFICIAL_CLIENT_ID}`);
     expect(authUrl).toContain("challenge_method=S256");
     expect(authUrl).toContain("machine_id=test-machine-id");
     const query = authUrl.slice(authUrl.indexOf("?") + 1);

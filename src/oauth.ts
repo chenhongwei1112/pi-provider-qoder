@@ -232,8 +232,11 @@ async function refreshQoderTokenForMode(credentials: OAuthCredentials, mode: str
   // The plugin's User-Agent stays `ProviderUserAgent` on purpose (ledger row 48:
   // the fork self-identifies rather than impersonating the official client).
   const refreshURL = `${getQoderOpenApiUrl(mode)}/api/v1/deviceToken/refresh`;
+  // Bare block, not try/catch: a failed refresh must throw, not be swallowed.
+  // The old code caught the error and extended validity by an hour, which is how
+  // the dead endpoint went unnoticed for so long.
   let response: Response;
-  try {
+  {
     response = await fetch(refreshURL, {
       method: "POST",
       headers: {
@@ -298,9 +301,5 @@ async function refreshQoderTokenForMode(credentials: OAuthCredentials, mode: str
     updateQoderModelsCache(newAccess, userID, prevName, prevEmail, mode).catch(() => {});
 
     return refreshed;
-  } catch (e) {
-    // Real refresh failures propagate (see the `!response.ok` branch). A non-Error
-    // throw is not a refresh outcome, so re-throw it too rather than swallow.
-    throw e;
   }
 }
