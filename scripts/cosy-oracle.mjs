@@ -42,6 +42,13 @@ export async function createOracle({ auditDir, machineId, uid, encryptUserInfo, 
       return glue.prepareWasmAuthenticatedRequest({ endpoint, path, method, body });
     },
 
+    // 官方 regenerateRuntimeFields()（pretty.mjs:114927-114931）的调用形状：单个 JSON
+    // 字符串进、JSON 字符串出，调用方 parse 成 { encrypt_user_info, key }。入参对象是
+    // { uid, organization_id, organization_tags, data_policy_agreed }。
+    runtimeAuthFields(userInfo) {
+      return JSON.parse(glue.generate_runtime_auth_fields(JSON.stringify(userInfo)));
+    },
+
     inferRequest({ endpoint, body, modelKey, modelSource }) {
       const result = glue.withWasmContextRetry((ctx) => ctx.prepareInferRequest(endpoint, body, modelKey, modelSource));
       try {

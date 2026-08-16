@@ -13,6 +13,10 @@
 const RUNTIME_END_MARKER = "WA = import.meta.require";
 const ENV_MAP_MARKER = "getClientMetadata: () => ";
 const WASM_MAP_MARKER = "prepareWasmAuthenticatedRequest: () => ";
+// 低层 wasm-bindgen 模块的导出映射（pretty.mjs:415），名字是 Rust 侧的 snake_case，
+// 和高层包装模块（WASM_MAP_MARKER 那张）是两张不同的表：后者另有一个 camelCase 的
+// decryptServerResponse，别混。锚点用 Rust 函数名本身，压缩不会改它。
+const BINDGEN_MAP_MARKER = "generate_runtime_auth_fields: () => ";
 const ENV_INIT_MARKER = '"CLIENT_TYPE"';
 
 const WANTED = [
@@ -23,6 +27,10 @@ const WANTED = [
   "withWasmContextRetry",
   "decryptServerResponse",
 ];
+
+// 按真实 snake_case 名导出，不起 camelCase 别名：台账（差异第 14/50 行）就是按这个
+// 名字引用官方导出的，可追溯性优先于 JS 命名风格。
+const BINDGEN_WANTED = ["generate_runtime_auth_fields"];
 
 function findLine(lines, needle, from = 0) {
   for (let i = from; i < lines.length; i++) if (lines[i].includes(needle)) return i;
@@ -36,6 +44,17 @@ function parseExportMap(line) {
     map.set(m[1], m[2]);
   }
   return map;
+}
+
+/** 从一张映射里反查一组名字，缺任何一个都响亮报错。 */
+function resolveWanted(map, wanted, label) {
+  const resolved = new Map();
+  for (const name of wanted) {
+    const ident = map.get(name);
+    if (!ident) throw new Error(`carve: marker not found: ${name} in ${label} export map`);
+    resolved.set(name, ident);
+  }
+  return resolved;
 }
 
 /**
@@ -70,6 +89,7 @@ export function carveGlue(prettySource) {
   const helper = findInitHelper(lines, runtimeEnd);
   const envMapLine = findLine(lines, ENV_MAP_MARKER);
   const wasmMapLine = findLine(lines, WASM_MAP_MARKER);
+  const bindgenMapLine = findLine(lines, BINDGEN_MAP_MARKER);
 
   // 胶水模块的收尾是紧跟导出映射的 `var <ident> = <helper>(() => { ... });`。
   // 从初始化器自己那行开始找 `});`，不是从映射行开始——映射行到初始化器之间
@@ -90,13 +110,12 @@ export function carveGlue(prettySource) {
   }
 
   const envMap = parseExportMap(lines[envMapLine]);
-  const wasmMap = parseExportMap(lines[wasmMapLine]);
-  const resolved = new Map();
-  for (const name of WANTED) {
-    const ident = wasmMap.get(name);
-    if (!ident) throw new Error(`carve: marker not found: ${name} in wasm export map`);
-    resolved.set(name, ident);
+  const resolved = resolveWanted(parseExportMap(lines[wasmMapLine]), WANTED, "wasm");
+  // 低层映射必须落在切出来的正文里，否则导出的是正文之外的标识符，模块一 import 就炸。
+  if (bindgenMapLine < envMapLine - 1 || bindgenMapLine > bodyEnd) {
+    throw new Error("carve: marker not found: bindgen export map inside the carved body");
   }
+  const bindgenResolved = resolveWanted(parseExportMap(lines[bindgenMapLine]), BINDGEN_WANTED, "bindgen");
   const metaIdent = envMap.get("getClientMetadata");
   if (!metaIdent) throw new Error("carve: marker not found: getClientMetadata in env export map");
 
@@ -115,6 +134,7 @@ export function carveGlue(prettySource) {
 
   const exportPairs = [
     ...WANTED.map((name) => `${resolved.get(name)} as ${name}`),
+    ...BINDGEN_WANTED.map((name) => `${bindgenResolved.get(name)} as ${name}`),
     `${metaIdent} as getClientMetadata`,
     `${envInit.name} as initEnvModule`,
     `${wasmInit.name} as initWasmModule`,

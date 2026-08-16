@@ -93,4 +93,33 @@ describe.skipIf(!auditDir)("cosy oracle against the official wasm", () => {
     expect(req.body).not.toBe(body);
     expect(req.body.length).toBe(Math.ceil(Buffer.byteLength(body) / 3) * 4);
   });
+
+  // 官方登录路径里 encrypt_user_info / key 全都是本地算的（台账差异第 14 行），
+  // 入参形状取自 regenerateRuntimeFields()（pretty.mjs:114929）。
+  const userInfo = {
+    uid: "test-user-id",
+    organization_id: "org-1",
+    organization_tags: ["tag-a"],
+    data_policy_agreed: true,
+  };
+
+  it("derives encrypt_user_info and key locally from the user info object", async () => {
+    const oracle = await createOracle({ auditDir, ...identity });
+    const fields = oracle.runtimeAuthFields(userInfo);
+    expect(Object.keys(fields).sort()).toEqual(["encrypt_user_info", "key"]);
+    expect(typeof fields.encrypt_user_info).toBe("string");
+    expect(typeof fields.key).toBe("string");
+    expect(fields.encrypt_user_info.length).toBeGreaterThan(0);
+    expect(fields.key.length).toBeGreaterThan(0);
+  });
+
+  // 台账差异第 50 行的服务端可观测性论证就靠这条：同一输入两次调用产出不同密文，
+  // 所以「官方每条凭据算一次、插件每请求算一次」在服务端看得出来。
+  it("produces a different pair on every call for the same input", async () => {
+    const oracle = await createOracle({ auditDir, ...identity });
+    const first = oracle.runtimeAuthFields(userInfo);
+    const second = oracle.runtimeAuthFields(userInfo);
+    expect(second.encrypt_user_info).not.toBe(first.encrypt_user_info);
+    expect(second.key).not.toBe(first.key);
+  });
 });

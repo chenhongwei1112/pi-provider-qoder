@@ -24,6 +24,13 @@ const PRETTY = [
   "function zzHeaders(m) { return m; }",
   "function zzRetry(f) { return f(); }",
   "function zzDecrypt(s) { return s; }",
+  "function zzAuthFields(s) { return s; }",
+  "function zzRawDecrypt(s) { return s; }",
+  "function zzProfile(s) { return s; }",
+  "var bindgenMod = {};",
+  // 低层 wasm-bindgen 表：snake_case，且故意也带一个 decrypt_server_response，
+  // 以证明它不会和高层表的 camelCase decryptServerResponse 串味。
+  "CD(bindgenMod, { profile_encrypt: () => zzProfile, generate_runtime_auth_fields: () => zzAuthFields, decrypt_server_response: () => zzRawDecrypt });",
   "var wasmMod = {};",
   "CD(wasmMod, { prepareWasmAuthenticatedRequest: () => zzPrepare, initWasm: () => zzInitWasm, createContext: () => zzCreate, headersMapToRecord: () => zzHeaders, withWasmContextRetry: () => zzRetry, decryptServerResponse: () => zzDecrypt });",
   "var wasmInit = _(() => {",
@@ -43,6 +50,14 @@ describe("carveGlue", () => {
     expect(out).toContain("zzRetry as withWasmContextRetry");
     expect(out).toContain("zzDecrypt as decryptServerResponse");
     expect(out).toContain("zzMeta as getClientMetadata");
+  });
+
+  it("re-exports generate_runtime_auth_fields from the snake_case bindgen map", () => {
+    const out = carveGlue(PRETTY);
+    expect(out).toContain("zzAuthFields as generate_runtime_auth_fields");
+    // 两张表各归各位：camelCase 的仍来自高层表。
+    expect(out).toContain("zzDecrypt as decryptServerResponse");
+    expect(out).not.toContain("as decrypt_server_response");
   });
 
   it("finds the env and wasm lazy initialisers by position, not by name", () => {
