@@ -1,0 +1,139 @@
+{
+  "qodercliVersion": "1.1.23",
+  "identity": {
+    "machineId": "0123456789abcdef0123456789abcdef",
+    "uid": "test-user-id",
+    "encryptUserInfo": "EUI",
+    "key": "KEY123",
+    "cosyVersion": "1.1.23"
+  },
+  "clientMetadata": {
+    "client_type": "5",
+    "business_product": "cli",
+    "business_type": "agent",
+    "scene": "assistant"
+  },
+  "catalogRequest": {
+    "url": "https://api3.qoder.sh/algo/api/v2/model/list?Encode=1",
+    "headerNames": [
+      "Accept",
+      "Accept-Encoding",
+      "Authorization",
+      "Content-Type",
+      "Cosy-Business-Product",
+      "Cosy-Business-Type",
+      "Cosy-ClientIp",
+      "Cosy-ClientType",
+      "Cosy-Data-Policy",
+      "Cosy-Date",
+      "Cosy-Key",
+      "Cosy-MachineId",
+      "Cosy-MachineOS",
+      "Cosy-MachineToken",
+      "Cosy-MachineType",
+      "Cosy-Scene",
+      "Cosy-User",
+      "Cosy-Version",
+      "Login-Version"
+    ],
+    "headers": {
+      "Accept": "application/json",
+      "Accept-Encoding": "identity",
+      "Content-Type": "application/json",
+      "Cosy-Business-Product": "cli",
+      "Cosy-Business-Type": "agent",
+      "Cosy-ClientIp": "0123456789abcdef0123456789abcdef",
+      "Cosy-ClientType": "5",
+      "Cosy-Data-Policy": "disagree",
+      "Cosy-Key": "KEY123",
+      "Cosy-MachineId": "0123456789abcdef0123456789abcdef",
+      "Cosy-MachineOS": "x86_64_linux",
+      "Cosy-MachineToken": "0123456789abcdef0123456789abcdef",
+      "Cosy-MachineType": "5",
+      "Cosy-Scene": "assistant",
+      "Cosy-User": "test-user-id",
+      "Cosy-Version": "1.1.23",
+      "Login-Version": "v2"
+    }
+  },
+  "inferRequest": {
+    "url": "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1",
+    "headerNames": [
+      "Accept",
+      "Authorization",
+      "Cache-Control",
+      "Connection",
+      "Content-Type",
+      "Cosy-Business-Product",
+      "Cosy-Business-Type",
+      "Cosy-ClientType",
+      "Cosy-Data-Policy",
+      "Cosy-Date",
+      "Cosy-Key",
+      "Cosy-MachineId",
+      "Cosy-MachineOS",
+      "Cosy-MachineToken",
+      "Cosy-MachineType",
+      "Cosy-Scene",
+      "Cosy-User",
+      "Cosy-Version",
+      "Login-Version",
+      "X-Model-Key",
+      "X-Model-Source"
+    ],
+    "headers": {
+      "Accept": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "Content-Type": "application/json",
+      "Cosy-Business-Product": "cli",
+      "Cosy-Business-Type": "agent",
+      "Cosy-ClientType": "5",
+      "Cosy-Data-Policy": "disagree",
+      "Cosy-Key": "KEY123",
+      "Cosy-MachineId": "0123456789abcdef0123456789abcdef",
+      "Cosy-MachineOS": "x86_64_linux",
+      "Cosy-MachineToken": "0123456789abcdef0123456789abcdef",
+      "Cosy-MachineType": "5",
+      "Cosy-Scene": "assistant",
+      "Cosy-User": "test-user-id",
+      "Cosy-Version": "1.1.23",
+      "Login-Version": "v2",
+      "X-Model-Key": "qmodel",
+      "X-Model-Source": "system"
+    }
+  },
+  "signature": {
+    "payloadB64": "eyJ2ZXJzaW9uIjoidjEiLCJyZXF1ZXN0SWQiOiIzOTNkNzRmMy0wZTEyLTQyNGEtOGQ3OC03YTkyNzNmOTU4ZDEiLCJpbmZvIjoiRVVJIiwiY29zeVZlcnNpb24iOiIxLjEuMjMiLCJpZGVWZXJzaW9uIjoiIn0=",
+    "payload": {
+      "version": "v1",
+      "requestId": "393d74f3-0e12-424a-8d78-7a9273f958d1",
+      "info": "EUI",
+      "cosyVersion": "1.1.23",
+      "ideVersion": ""
+    },
+    "cosyKey": "KEY123",
+    "timestamp": "1786874286",
+    "body": "",
+    "sigPath": "/api/v2/model/list",
+    "md5": "ce60b3b268500eaa1053ee35f911866d"
+  },
+  "bodyEncoding": [
+    {
+      "input": "{\"session_id\":\"s-1\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+      "encoded": "YB*f*#(WhJHFhJoByBOi)BE.Jep$$SF^N(gEDxV*lLtXBEKbuHa*l*K.N(FmYK^Dxj^PSWhx(LzBMn*NYw%B*f*u"
+    },
+    {
+      "input": "{\"a\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}",
+      "encoded": "mZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImoKWmZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImYKiBMn*mZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiImZiI"
+    },
+    {
+      "input": "{}",
+      "encoded": "$kwm"
+    },
+    {
+      "input": "{\"u\":\"中文测试 emoji 🚀\"}",
+      "encoded": "))BvoeOn_*ep$$PZQUSGycAFBHFtu(mYK.BMn*QG*tQ)"
+    }
+  ]
+}
