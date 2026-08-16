@@ -14,7 +14,7 @@ import { agentPath } from "./paths.js";
 /** Shape of a single entry returned by the Qoder /model/list endpoint. */
 interface QoderModelEntry {
   key?: string;
-  enable?: boolean;
+  enable?: boolean | 0;
   display_name?: string;
   max_input_tokens?: number;
   max_output_tokens?: number;
@@ -163,8 +163,14 @@ export async function updateQoderModelsCache(
       return;
     }
 
-    const resData = (await response.json()) as { chat?: QoderModelEntry[] };
-    const chatModels = resData.chat || [];
+    const resData = (await response.json()) as {
+      chat?: QoderModelEntry[];
+      assistant?: QoderModelEntry[];
+      [scene: string]: unknown;
+    };
+    // qodercli 的默认场景是 assistant（SM().scene ?? "assistant"），dogfood
+    // 模型只在该场景返回。chat 场景是旧端点的缩减目录，保留作回退。
+    const chatModels = resData.assistant || resData.chat || [];
     if (chatModels.length === 0) return;
 
     const newModels: QoderModelDef[] = [];
@@ -172,7 +178,7 @@ export async function updateQoderModelsCache(
 
     for (const entry of chatModels) {
       const key = entry.key;
-      if (!key || !entry.enable) continue;
+      if (!key || entry.enable === false || entry.enable === 0) continue;
 
       const display = entry.display_name || key;
       let ctxLen = entry.max_input_tokens || 180000;

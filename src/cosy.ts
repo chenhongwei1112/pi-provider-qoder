@@ -93,9 +93,11 @@ export function getQoderCenterUrl(mode?: string): string {
 }
 
 export function getQoderModelListURL(mode?: string): string {
-  // The CLI uses Encode=1 for the model catalog. Without it, the service
-  // returns a reduced catalog and omits models such as Cantus/cmodel.
-  return `${getQoderBaseUrl(mode)}algo/api/v2/model/list?Encode=1`;
+  // 与 qodercli 1.1.23 对齐（反编译实证）：目录端点是 /api/v2/model/list，
+  // 不带 /algo 前缀、不带 Encode=1。/algo 端点返回的是 chat 场景的缩减目录
+  // （16 个模型，无 dogfood 条目），而 qodercli 用这个端点能拿到完整目录
+  // （38 个跨场景条目，含 qwen3.8-v120-dogfood-crit）。
+  return `${getQoderBaseUrl(mode)}api/v2/model/list`;
 }
 
 export function getQoderChatURL(mode?: string): string {

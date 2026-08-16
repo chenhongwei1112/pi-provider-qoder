@@ -100,4 +100,50 @@ describe("Qoder model cache", () => {
 
     expect(getCachedModels("global").map((model) => model.id)).toEqual(["ultimate"]);
   });
+
+  it("keeps entries without an explicit enable flag (dogfood/crit models)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            chat: [
+              { key: "qwen3.8-v120-dogfood-crit", display_name: "Peach-07-17-DogFooding" },
+              { key: "disabled-entry", enable: false, display_name: "Disabled" },
+            ],
+          }),
+      }),
+    );
+
+    await updateQoderModelsCache("access-token", "user-id", "Test User", "test@example.com", "global");
+
+    const cache = JSON.parse(readFileSync(CACHE_PATH, "utf8"));
+    expect(cache.models.map((model: { id: string }) => model.id)).toEqual(["qwen3.8-v120-dogfood-crit"]);
+  });
+
+  it("prefers the assistant scene over chat (qodercli default scene)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            chat: [{ key: "dfmodel", enable: true, display_name: "DeepSeek-V4-Flash" }],
+            assistant: [
+              { key: "dfmodel", enable: true, display_name: "DeepSeek-V4-Flash" },
+              { key: "qwen3.8-v120-dogfood-crit", display_name: "Peach-07-17-DogFooding" },
+            ],
+          }),
+      }),
+    );
+
+    await updateQoderModelsCache("access-token", "user-id", "Test User", "test@example.com", "global");
+
+    const cache = JSON.parse(readFileSync(CACHE_PATH, "utf8"));
+    expect(cache.models.map((model: { id: string }) => model.id)).toEqual([
+      "dfmodel",
+      "qwen3.8-v120-dogfood-crit",
+    ]);
+  });
 });
