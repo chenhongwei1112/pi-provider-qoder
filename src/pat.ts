@@ -115,15 +115,22 @@ async function fetchUserInfo(jobToken: string, mode: string): Promise<{ userID: 
       },
     });
     if (res.ok) {
+      // 官方读三个 uid 别名并在缺失时硬失败（`pretty.mjs:114999-115002`）。插件此前
+      // 只读 `id`，服务端一旦返回 `uid` 就会拿到空串，接着 `buildAuthHeaders` 抛
+      // `cosy: user id is empty`。别名照抄官方，包括 name 的三个别名。
+      // 台账差异第 49 行。
       const info = (await res.json()) as {
         id?: string;
+        user_id?: string;
+        uid?: string;
         email?: string;
         name?: string;
         username?: string;
+        user_name?: string;
       };
-      userID = info.id || "";
+      userID = info.id || info.user_id || info.uid || "";
       email = info.email || "";
-      name = info.name || info.username || "";
+      name = info.name || info.username || info.user_name || "";
     }
   } catch (e) {
     console.error("[pi-provider-qoder] Failed to fetch user info:", e);
