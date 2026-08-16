@@ -58,11 +58,15 @@ export async function exchangeJobToken(pat: string, mode: string = getQoderMode(
   const res = await fetch(getQoderExchangeURL(mode), {
     method: "POST",
     headers: {
+      // `pretty.mjs:114954-114957`: official openapi helper requests carry no
+      // COSY header at all — only `Accept`, an opt-in `User-Agent`, plus
+      // `Authorization` when there is a token and `Content-Type` when there is
+      // a body (ledger row 47). The `Cosy-Version: 1.0.1` / `Cosy-ClientType: 5`
+      // this used to send were invented; `1.0.1` was also a third version string
+      // that did not match the client's real one.
       "Content-Type": "application/json",
       Accept: "application/json",
       "User-Agent": ProviderUserAgent,
-      "Cosy-Version": "1.0.1",
-      "Cosy-ClientType": "5",
     },
     body: JSON.stringify({ personal_token: pat }),
   });

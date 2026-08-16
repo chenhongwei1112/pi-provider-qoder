@@ -413,6 +413,45 @@ async function checkProductionBody(creds: Creds) {
   );
 }
 
+/**
+ * 第 5 步：端点动态发现（面 1 第 15 行）。官方不是硬编码 host，而是调
+ * `/api/v{3,4}/service/region/endpoints` 拿服务端下发的端点表（`pretty.mjs:77297`）。
+ * 这一步只取证：打真实的发现端点，看服务端给这个账号返回什么 host，
+ * 从而判断插件硬编码的 `api3.qoder.sh` 是对是错。
+ */
+async function checkEndpointDiscovery(creds: Creds) {
+  // 官方的发现 seed 不是插件硬编码的 `api3.qoder.sh`（那个只在 inference 路径上）。
+  // bundle 里的 prod host 是 `api2-v2.qoder.sh`（`pretty.mjs:136971` 的 `MWQ.prod`）
+  // 与 `openapi.qoder.sh`（`pretty.mjs:119730`）。两个都试。
+  for (const host of ["https://api2-v2.qoder.sh", "https://openapi.qoder.sh", "https://api3.qoder.sh"]) {
+    for (const path of ["/api/v3/service/region/endpoints", "/api/v4/service/region/endpoints"]) {
+      const url = `${host}${path}`;
+      const headers = buildAuthHeaders(
+        null,
+        url,
+        { userID: creds.userID, authToken: creds.access, name: creds.name || "", email: creds.email || "", machineID: creds.machineID },
+        "auth",
+      );
+      try {
+        const res = await fetch(url, { headers: { ...headers, Accept: "application/json" }, signal: AbortSignal.timeout(20000) });
+        const text = await res.text();
+        const hosts = [...text.matchAll(/https?:\/\/[a-z0-9.-]+/gi)].map((m) => m[0]).filter((h, i, a) => a.indexOf(h) === i);
+        // 信息性记录，恒 ok：2026-08-16 实测这个发现服务整体 404（v3/v4 × 三 host ×
+        // /algo 前缀 × 带 token 八组合全试过），bundle 里的 prod host `api2-v2.qoder.sh`
+        // 连 `/algo/api/v1/ping` 都是 404 —— 发现服务已下线。它记下服务端何时回来，
+        // 不应让整份对齐校验变红。台账面 1 第 15 行据此改判「无需对齐」。
+        record(
+          `[信息] ${host}${path}`,
+          true,
+          res.ok ? `${res.status}，下发 host：${hosts.join(" ") || "<无>"} —— 发现服务已恢复，值得重估第 15 行` : `${res.status}（发现服务仍下线）`,
+        );
+      } catch (e) {
+        record(`[信息] ${host}${path}`, true, `请求失败（发现服务仍下线）：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+}
+
 async function main() {
   console.log(`mode=${mode} model=${MODEL}\n`);
   const creds = await loadCreds();
@@ -421,6 +460,7 @@ async function main() {
   await checkUsage(creds);
   await checkChat(creds);
   await checkProductionBody(creds);
+  await checkEndpointDiscovery(creds);
 
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${"─".repeat(60)}`);
