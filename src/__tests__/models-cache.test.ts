@@ -150,6 +150,87 @@ describe("Qoder model cache", () => {
     expect(cache.models.map((model: { id: string }) => model.id)).toEqual(["dfmodel", "qwen3.8-v120-dogfood-crit"]);
   });
 
+  // Ledger row 41: official merges EVERY scene into one catalog (config scene
+  // first and winning on duplicate keys), merges byok_enterprise into the config
+  // scene, and warns — not fails — when the config scene is absent.
+  describe("cross-scene merge (ledger row 41)", () => {
+    it("merges entries from every scene, not just the configured one", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          jsonResponse({
+            assistant: [{ key: "ultimate", enable: true }],
+            quest: [{ key: "quest-auto", enable: true }],
+            nap: [{ key: "nap-auto", enable: true }],
+          }),
+        ),
+      );
+
+      await updateQoderModelsCache("access-token", "user-id", "Test User", "test@example.com", "global");
+
+      const cache = JSON.parse(readFileSync(CACHE_PATH, "utf8"));
+      expect(cache.models.map((m: { id: string }) => m.id)).toEqual(["ultimate", "quest-auto", "nap-auto"]);
+      // The origin scene is recorded on the stored config entry.
+      expect(cache.configs["quest-auto"].server_scene).toBe("quest");
+      expect(cache.configs.ultimate.server_scene).toBe("assistant");
+    });
+
+    it("lets the configured scene win when another scene carries the same key", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          jsonResponse({
+            assistant: [{ key: "cmodel", enable: true, display_name: "FromAssistant" }],
+            qwake: [
+              { key: "cmodel", enable: true, display_name: "FromQwake" },
+              { key: "safety", enable: true },
+            ],
+          }),
+        ),
+      );
+
+      await updateQoderModelsCache("access-token", "user-id", "Test User", "test@example.com", "global");
+
+      const cache = JSON.parse(readFileSync(CACHE_PATH, "utf8"));
+      expect(cache.models.map((m: { id: string }) => m.id)).toEqual(["cmodel", "safety"]);
+      expect(cache.models.find((m: { id: string }) => m.id === "cmodel").name).toBe("FromAssistant");
+      expect(cache.configs.cmodel.server_scene).toBe("assistant");
+    });
+
+    it("merges byok_enterprise entries into the configured scene with their origin marked", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          jsonResponse({
+            assistant: [{ key: "ultimate", enable: true }],
+            byok_enterprise: [
+              { key: "ultimate", enable: true, display_name: "Shadowed" }, // dup of an assistant key
+              { key: "qwen3.8-v120-dogfood-crit", enable: true },
+            ],
+          }),
+        ),
+      );
+
+      await updateQoderModelsCache("access-token", "user-id", "Test User", "test@example.com", "global");
+
+      const cache = JSON.parse(readFileSync(CACHE_PATH, "utf8"));
+      // The duplicate byok key is skipped; the unique one is merged in once.
+      expect(cache.models.map((m: { id: string }) => m.id)).toEqual(["ultimate", "qwen3.8-v120-dogfood-crit"]);
+      expect(cache.configs["qwen3.8-v120-dogfood-crit"].server_scene).toBe("byok_enterprise");
+    });
+
+    it("warns instead of failing when the configured scene is missing", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ chat: [{ key: "cmodel", enable: true }] })));
+
+      await updateQoderModelsCache("access-token", "user-id", "Test User", "test@example.com", "global");
+      warn.mockRestore();
+
+      const cache = JSON.parse(readFileSync(CACHE_PATH, "utf8"));
+      expect(cache.models.map((m: { id: string }) => m.id)).toEqual(["cmodel"]);
+    });
+  });
+
   // 台账差异第 40 行：官方对目录响应无条件过一遍解密。这条用编码后的正文喂进去，
   // 证明解码真的接在了生产路径上，而不只是 qoder-encoding.ts 里的一个纯函数。
   it("reads a catalog response that arrived in the obfuscated form", async () => {

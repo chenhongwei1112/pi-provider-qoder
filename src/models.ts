@@ -180,9 +180,49 @@ export async function updateQoderModelsCache(
       assistant?: QoderModelEntry[];
       [scene: string]: unknown;
     }>(await response.text());
-    // qodercli 的默认场景是 assistant（SM().scene ?? "assistant"），dogfood
-    // 模型只在该场景返回。chat 场景是旧端点的缩减目录，保留作回退。
-    const chatModels = resData.assistant || resData.chat || [];
+    // Official merges every scene in the response into one catalog (ledger row 41,
+    // pretty.mjs:105953-105970): the configured scene (assistant) goes first and
+    // wins on duplicate keys; byok_enterprise entries it lacks are merged into it
+    // (pretty.mjs:105500-105514). A missing configured scene warns but does not
+    // fail; the old silent assistant||chat fallback swapped catalogs with no sign.
+    const configScene = "assistant";
+    const sceneNames = Object.keys(resData).filter((s) => Array.isArray(resData[s]));
+    if (!sceneNames.includes(configScene)) {
+      console.warn(
+        `[pi-provider-qoder] catalog has no "${configScene}" scene; merging the scenes the server sent: ${sceneNames.join(", ")}`,
+      );
+    }
+    const orderedScenes = [configScene, ...sceneNames.filter((s) => s !== configScene && s !== "byok_enterprise")];
+
+    const mergedEntries: QoderModelEntry[] = [];
+    const seenKeys = new Set<string>();
+    for (const scene of orderedScenes) {
+      // `pretty.mjs:105956`: a scene that is absent or not an array is skipped —
+      // the configured scene may be missing entirely, which is the warn case above.
+      const sceneEntries = resData[scene];
+      if (!Array.isArray(sceneEntries)) continue;
+      let entries = sceneEntries as QoderModelEntry[];
+      if (scene === configScene) {
+        const byok = resData.byok_enterprise;
+        if (Array.isArray(byok) && byok.length > 0) {
+          const have = new Set(entries.map((e) => e?.key).filter((k): k is string => !!k));
+          const extra = (byok as QoderModelEntry[]).filter((e) => e?.key && !have.has(e.key));
+          // byok 条目带着自己的 scene 标记并入（官方 EXH 记 `serverScene: byok_enterprise`）。
+          entries = [...entries, ...extra.map((e) => ({ ...e, server_scene: "byok_enterprise" }))];
+        }
+      }
+      for (const entry of entries) {
+        const key = entry?.key;
+        if (!key || seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        mergedEntries.push(
+          scene === configScene && !entry.server_scene
+            ? { ...entry, server_scene: scene }
+            : { ...entry, server_scene: entry.server_scene ?? scene },
+        );
+      }
+    }
+    const chatModels = mergedEntries;
     if (chatModels.length === 0) return;
 
     const newModels: QoderModelDef[] = [];
