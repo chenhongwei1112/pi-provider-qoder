@@ -1040,6 +1040,29 @@ const BODY_CASES = [
   JSON.stringify({ u: "中文测试 emoji 🚀" }),
 ];
 
+/**
+ * WASM 只产出一部分请求头，官方在 JS 层还会补身份头。取证（`.qoder-audit/1.1.23/pretty.mjs`）：
+ *   :69460  `EUH(C2,"Cosy-Version",CUH), EUH(C2,"Cosy-ClientType",SM().client_type),
+ *            EUH(C2,"Cosy-MachineOS",QUH)`，并在 `requestClass === "infer-sse"` 时追加
+ *            `Cosy-MachineHostname`
+ *   :69431  `EUH` 是大小写无关的「不存在才写」，所以 WASM 已给的 `Cosy-Version` /
+ *            `Cosy-ClientType` 不会被覆盖 —— 实际只多出 `Cosy-MachineOS` 一个
+ *   :69487  `var QUH = "x86_64_linux"`
+ *   :105910 model-list 与 :146170 infer-sse 都传 `injectClientIdentityHeaders:
+ *            !isServiceAccount()`，普通用户为 true，两类请求都注入
+ * `Cosy-MachineHostname` 取值随机器变化（:69407 主机名不 header-safe 时会被规范化甚至省略），
+ * 冻结进向量会让测试在别的机器上红，所以不冻结，只在 Task 8 台账里记成条件差异。
+ */
+const JS_LAYER_HEADERS = { "Cosy-MachineOS": "x86_64_linux" };
+
+function withJsLayerHeaders(headers) {
+  const out = { ...headers };
+  for (const [name, value] of Object.entries(JS_LAYER_HEADERS)) {
+    if (!Object.keys(out).some((n) => n.toLowerCase() === name.toLowerCase())) out[name] = value;
+  }
+  return out;
+}
+
 const auditDir = findAuditDir();
 if (!auditDir) throw new Error("freeze: no .qoder-audit/<version>/glue.mjs; run npm run audit:extract first");
 
@@ -1065,13 +1088,13 @@ const vectors = {
   clientMetadata: oracle.clientMetadata(),
   catalogRequest: {
     url: catalog.url,
-    headerNames: Object.keys(catalog.headers).sort(),
-    headers: omitVolatile(catalog.headers),
+    headerNames: Object.keys(withJsLayerHeaders(catalog.headers)).sort(),
+    headers: omitVolatile(withJsLayerHeaders(catalog.headers)),
   },
   inferRequest: {
     url: infer.url,
-    headerNames: Object.keys(infer.headers).sort(),
-    headers: omitVolatile(infer.headers),
+    headerNames: Object.keys(withJsLayerHeaders(infer.headers)).sort(),
+    headers: omitVolatile(withJsLayerHeaders(infer.headers)),
   },
   signature: {
     payloadB64,
@@ -1114,7 +1137,7 @@ node node_modules/@biomejs/biome/bin/biome format --write src/__tests__/fixtures
 Expected: 输出 `froze vectors for qodercli 1.1.23`，文件生成
 
 Run: `node -e "const v=require('./src/__tests__/fixtures/cosy-oracle-vectors.json'); console.log(v.catalogRequest.url); console.log(v.inferRequest.headerNames.join(' '))"`
-Expected: URL 为 `https://api3.qoder.sh/algo/api/v2/model/list?Encode=1`；infer 头名里包含 `Cosy-Business-Product`、`Cosy-Business-Type`、`Cosy-Scene`、`Connection`、`X-Model-Key`、`X-Model-Source`
+Expected: URL 为 `https://api3.qoder.sh/algo/api/v2/model/list?Encode=1`；infer 头名里包含 `Cosy-Business-Product`、`Cosy-Business-Type`、`Cosy-Scene`、`Connection`、`Cosy-MachineOS`、`X-Model-Key`、`X-Model-Source`
 
 - [ ] **Step 3: 写向量测试**
 
@@ -1225,7 +1248,6 @@ describe("known header differences (locked, see docs/qoder-alignment-audit.md)",
       "Cosy-Bodyhash",
       "Cosy-Bodylength",
       "Cosy-Clientip",
-      "Cosy-Machineos",
       "Cosy-Organization-Id",
       "Cosy-Organization-Tags",
       "Cosy-Sigpath",
@@ -1240,7 +1262,7 @@ describe("known header differences (locked, see docs/qoder-alignment-audit.md)",
         return hit !== undefined && hit !== official;
       })
       .sort();
-    expect(mismatched).toEqual(["Cosy-ClientType", "Cosy-MachineId", "Cosy-MachineToken", "Cosy-MachineType"]);
+    expect(mismatched).toEqual(["Cosy-ClientType", "Cosy-MachineId", "Cosy-MachineOS", "Cosy-MachineToken", "Cosy-MachineType"]);
   });
 
   it("still pins a stale Cosy-Version", () => {
