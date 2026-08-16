@@ -23,6 +23,9 @@ import {
   getQoderUsageURL,
   ProviderUserAgent,
 } from "../src/cosy.js";
+import type { AssistantMessage, AssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { QoderEventTranslator } from "../src/events.js";
+import { SSEFramer } from "../src/sse.js";
 import { credentialsFromPat, isPatRefresh } from "../src/pat.js";
 import { parseQoderJsonBody, qoderEncodeBodyToBuffer } from "../src/qoder-encoding.js";
 
@@ -210,18 +213,76 @@ async function checkChat(creds: Creds) {
     record("chat stream readable", false, "no response body");
     return;
   }
+  // 真实字节流同时喂两条路：① 原样留存，用于报告服务端是明文还是编码正文；
+  // ② 走生产的 SSEFramer + QoderEventTranslator，这是面 3 解析改动唯一的真实数据验证
+  //    —— 单元测试的 SSE 都是我手写的，只有这里的帧是服务端真发的。
+  const output = {
+    role: "assistant" as const,
+    content: [] as AssistantMessage["content"],
+    usage: { input: 0, output: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 },
+    stopReason: undefined as AssistantMessage["stopReason"],
+  } as unknown as AssistantMessage;
+  const events: string[] = [];
+  const eventStream = { push: (e: { type: string }) => events.push(e.type) } as unknown as AssistantMessageEventStream;
+  const translator = new QoderEventTranslator(output, eventStream, { thinkingEnabled: false });
+  const framer = new SSEFramer();
+
   const decoder = new TextDecoder();
   let seen = "";
   let chunks = 0;
-  while (chunks < 40) {
+  let frames = 0;
+  let terminated = false;
+  let parseError = "";
+  // 上限要足够大到让流自己走到 [DONE]：推理型模型在吐出正文前可能先发很长的
+  // reasoning_content，早早截断会让"未终止"看起来像解析 bug（第一次跑就是这样）。
+  while (chunks < 600) {
     const { done, value } = await reader.read();
     if (done) break;
-    seen += decoder.decode(value, { stream: true });
+    const text = decoder.decode(value, { stream: true });
+    seen += text;
     chunks += 1;
-    if (seen.includes("[DONE]") || seen.length > 4000) break;
+    if (!terminated && !parseError) {
+      try {
+        for (const frame of framer.push(text)) {
+          frames += 1;
+          if (translator.push(frame) === "done") {
+            terminated = true;
+            break;
+          }
+        }
+      } catch (e) {
+        parseError = e instanceof Error ? e.message : String(e);
+      }
+    }
+    if (terminated || seen.length > 400000) break;
   }
   await reader.cancel().catch(() => {});
   record(`chat responded ${res.status} and streamed`, seen.length > 0, `${chunks} 个分片，${seen.length} 字符；首片: ${seen.slice(0, 120).replace(/\n/g, "\\n")}`);
+
+  // 面 3 第 32/33/34 行：真实帧必须被事件块分帧器认出来，且不能抛。
+  record(
+    "production SSE framer + translator consume the real gateway stream",
+    frames > 0 && !parseError,
+    parseError ? `解析抛错：${parseError}` : `${frames} 个事件块，事件序列前若干：${events.slice(0, 6).join(" → ") || "<无>"}`,
+  );
+
+  // 面 3 第 35 行：真实流必须走到终止且落一个有效 stopReason，不能静默无终止。
+  let stopReason = output.stopReason;
+  if (!parseError) {
+    try {
+      stopReason = translator.finalize();
+    } catch (e) {
+      parseError = e instanceof Error ? e.message : String(e);
+    }
+  }
+  const text = output.content.find((c) => c.type === "text");
+  record(
+    "the real stream produces text and a valid stop reason",
+    !parseError && (text ? "text" in text && text.text.length > 0 : false),
+    parseError
+      ? `finalize 抛错：${parseError}`
+      : `stopReason=${stopReason ?? "<未设>"}，terminated=${terminated}，文本=${JSON.stringify(text && "text" in text ? text.text.slice(0, 60) : "")}`,
+  );
 }
 
 async function main() {
@@ -235,7 +296,7 @@ async function main() {
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${"─".repeat(60)}`);
   if (failed.length === 0) {
-    console.log(`全部 ${results.length} 项通过。第二阶段第一批的 15 条改动在真实网关上没有回归。`);
+    console.log(`全部 ${results.length} 项通过。第二阶段的改动（身份链 18 条 + 面 3 解析 6 条）在真实网关上没有回归。`);
     return;
   }
   console.log(`${failed.length}/${results.length} 项失败：`);
