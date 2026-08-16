@@ -38,14 +38,14 @@ JS 层可读的逻辑是唯一例外，且必须带行号。
 | 3 | 1 | WASM 头大小写 | `Cosy-MachineId` / `Cosy-MachineToken` / `Cosy-MachineType` / `Cosy-ClientType` | ~~`Cosy-Machineid` / `Cosy-Machinetoken` / `Cosy-Machinetype` / `Cosy-Clienttype`~~ **已修**：四个头名改成官方拼法（`cosy.ts:346-350`） | `锁定:"still spells these headers with different casing than the official client"` | 高 | 必须对齐 |
 | 4 | 1 | `Cosy-MachineOS` 大小写 | 官方**在 JS 层**注入，不在 WASM 里：`JS:69460` 用大小写无关的"不存在才写"helper（`JS:69431`）写入 `JS:69487` 的常量 `x86_64_linux`；model-list（`JS:105910`）与 infer-sse（`JS:146170`）都传 `injectClientIdentityHeaders: !isServiceAccount()`，普通用户为 true | ~~`Cosy-Machineos`~~ **已修**：改成 `Cosy-MachineOS`（`cosy.ts:349`），值的计算方式本来就一致 | `V.inferRequest.headerNames`（含 `Cosy-MachineOS`，由 `scripts/freeze-vectors.mjs:36` 按上述行号合并进来）；`锁定:"still spells these headers with different casing than the official client"` | 高 | 必须对齐 |
 | 5 | 1 | 业务标识头缺失 | `Cosy-Business-Product: cli`、`Cosy-Business-Type: agent`、`Cosy-Scene: assistant`（两类请求都发） | ~~三个都不发~~ **已修**：补上 `cli` / `agent` / `assistant` 三个头（常量 `cosy.ts:24-26`，写在 `cosy.ts:351-353`），取值即官方 `getClientMetadata()` 的默认值 | `V.inferRequest.headers`、`V.catalogRequest.headers`；`锁定:"still misses exactly these official headers"`；`预言机:"emits the business identity headers on the infer request"` | 高 | 必须对齐 |
-| 6 | 1 | `Connection` | infer 带 `Connection: keep-alive` | 不发（`transport.ts:201-209`） | `V.inferRequest.headers.Connection`；`锁定:"still misses exactly these official headers"` | 中 | 必须对齐 |
+| 6 | 1 | `Connection` | infer 带 `Connection: keep-alive` | ~~不发~~ **已修**：`transport.ts:207` 在 infer 请求上发 `Connection: keep-alive` | `V.inferRequest.headers.Connection`；`锁定:"still misses exactly these official headers"` | 中 | 必须对齐 |
 | 7 | 1 | 多发签名辅助头 | 两类请求都不发 `Cosy-Bodyhash` / `Cosy-Bodylength` / `Cosy-Sigpath` | ~~三个都发，把签名的中间量摊在明文头里~~ **已修**：三个头连同 `bodyHash` / `bodyLen` 的计算一起删掉（`cosy.ts:334-360`） | `V.inferRequest.headerNames`、`V.catalogRequest.headerNames` 均无；`锁定:"still sends exactly these headers the official client does not"` | 高 | 必须对齐 |
-| 8 | 1 | 多发空值组织头 | 在本审计的取证身份下不发 `Cosy-Organization-Id` / `Cosy-Organization-Tags`（官方的组织相关头走另一条 codebase 路径，`JS:146167-146169`，且只对 target organization 生效） | 恒发两个空字符串（`cosy.ts:351-352`） | `V.inferRequest.headerNames`、`V.catalogRequest.headerNames` 均无；`锁定:"still sends exactly these headers the official client does not"` | 中 | 必须对齐 |
-| 9 | 1 | 多发 `X-Request-Id` | 只在 `endpointType === "openapi"` 或 host 含 `openapi` 时写 `X-Request-ID`（`JS:68585`、`JS:68592`、`JS:68607-68610`，头名常量 `JS:68612`）。`api3.qoder.sh` 上的 model-list 与 infer 都是 `endpointType: "infer"`，两者都不写 | 恒发 `X-Request-Id`（`cosy.ts:354`），大小写也与官方的 `X-Request-ID` 不同 | `V.inferRequest.headerNames`、`V.catalogRequest.headerNames` 均无；`锁定:"still sends exactly these headers the official client does not"` | 中 | 必须对齐 |
-| 10 | 1 | `Cosy-ClientIp` | **按请求类不同**：auth GET 发，值等于 machineId；infer 不发 | 两类都发，值恒为 `127.0.0.1`（`cosy.ts:346`） | `V.catalogRequest.headers["Cosy-ClientIp"]` = machineId；`V.inferRequest.headerNames` 无此项；`预言机:"emits the business identity headers on the infer request"` 显式断言 infer 上为 undefined；`锁定:"still sends exactly these headers the official client does not"` | 中 | 必须对齐 |
-| 11 | 1 | `Accept-Encoding` | **按请求类不同**：auth GET 带 `identity`，infer 不带 | 正好反了：infer 带（`transport.ts:205`），model-list 不带（`models.ts:153-160` 只并入 `Accept`） | `V.catalogRequest.headers["Accept-Encoding"]` = `identity`；`V.inferRequest.headerNames` 无此项；`锁定:"still sends exactly these headers the official client does not"` | 低 | 必须对齐 |
-| 12 | 1 | auth GET 的 `Content-Type` | 即使是无体 GET 也带 `Content-Type: application/json` | model-list 不带（`models.ts:153-160`）。**该差异不在锁定套件里**——锁定套件只比 infer 类 | `V.catalogRequest.headers["Content-Type"]` | 低 | 必须对齐 |
-| 13 | 1 | `Cosy-MachineHostname` | 仅 `requestClass === "infer-sse"` 时发（`JS:69460-69462`），且主机名必须 header-safe：不安全时 `JS:69407`→`JS:69383` 会规范化甚至省略并打 warn | 从不发 | `JS:69460-69462`、`JS:69407`、`JS:69383-69386`；**故意不冻结进向量**（值随机器变化，冻结会让测试在别的机器上红，见 `scripts/freeze-vectors.mjs:23-34`） | 中 | 必须对齐 |
+| 8 | 1 | 多发空值组织头 | 在本审计的取证身份下不发 `Cosy-Organization-Id` / `Cosy-Organization-Tags`（官方的组织相关头走另一条 codebase 路径，`JS:146167-146169`，且只对 target organization 生效） | ~~恒发两个空字符串~~ **已修**：两个头都删掉了 | `V.inferRequest.headerNames`、`V.catalogRequest.headerNames` 均无；`锁定:"still sends exactly these headers the official client does not"` | 中 | 必须对齐 |
+| 9 | 1 | 多发 `X-Request-Id` | 只在 `endpointType === "openapi"` 或 host 含 `openapi` 时写 `X-Request-ID`（`JS:68585`、`JS:68592`、`JS:68607-68610`，头名常量 `JS:68612`）。`api3.qoder.sh` 上的 model-list 与 infer 都是 `endpointType: "infer"`，两者都不写 | ~~恒发 `X-Request-Id`，大小写也与官方的 `X-Request-ID` 不同~~ **已修**：删掉了。官方只在 openapi 类请求上发它，插件没有那类请求 | `V.inferRequest.headerNames`、`V.catalogRequest.headerNames` 均无；`锁定:"still sends exactly these headers the official client does not"` | 中 | 必须对齐 |
+| 10 | 1 | `Cosy-ClientIp` | **按请求类不同**：auth GET 发，值等于 machineId；infer 不发 | ~~两类都发，值恒为 `127.0.0.1`~~ **已修**：改成只在 auth 类发、值取 machineId，与官方一致（`cosy.ts` 的 `requestClass === "auth"` 分支）。`锁定:"keeps Cosy-ClientIp and Accept-Encoding on the auth class only"` 双向断言 | `V.catalogRequest.headers["Cosy-ClientIp"]` = machineId；`V.inferRequest.headerNames` 无此项；`预言机:"emits the business identity headers on the infer request"` 显式断言 infer 上为 undefined；`锁定:"still sends exactly these headers the official client does not"` | 中 | 必须对齐 |
+| 11 | 1 | `Accept-Encoding` | **按请求类不同**：auth GET 带 `identity`，infer 不带 | ~~正好反了：infer 带、model-list 不带~~ **已修**：改成只在 auth 类发 `identity`，infer 不发 | `V.catalogRequest.headers["Accept-Encoding"]` = `identity`；`V.inferRequest.headerNames` 无此项；`锁定:"still sends exactly these headers the official client does not"` | 低 | 必须对齐 |
+| 12 | 1 | auth GET 的 `Content-Type` | 即使是无体 GET 也带 `Content-Type: application/json` | ~~model-list 不带；且该差异不在锁定套件里——锁定套件只比 infer 类~~ **已修**：`models.ts` 的 fetch 现在带 `Content-Type: application/json`，**并且锁定套件已改成两个请求类都比**，这类"只比一半"的漏洞不会再有 | `V.catalogRequest.headers["Content-Type"]` | 低 | 必须对齐 |
+| 13 | 1 | `Cosy-MachineHostname` | 仅 `requestClass === "infer-sse"` 时发（`JS:69460-69462`），且主机名必须 header-safe：不安全时 `JS:69407`→`JS:69383` 会规范化甚至省略并打 warn | ~~从不发~~ **已修**：infer 请求在主机名 header-safe 时发它，规范化规则照官方 `pretty.mjs:69383-69398` 复刻（`cosy.ts` 的 `normalizeMachineHostname`），七条用例覆盖原样透传 / 去空白 / punycode / 不安全字符压成 slug+sha256 前 8 位 / 全不安全时 `unknown-<hash>` / 96 字符截断 / 空值不发头 | `JS:69460-69462`、`JS:69407`、`JS:69383-69386`；**故意不冻结进向量**（值随机器变化，冻结会让测试在别的机器上红，见 `scripts/freeze-vectors.mjs:23-34`） | 中 | 必须对齐 |
 | 14 | 1 | `info` / `Cosy-Key` 来源 | **本地生成，不是服务端下发。**Task 7 写的"登录响应下发、客户端原样回放"是推断，本轮实测推翻：三条登录路径都先把 `encrypt_user_info` 与 `key` 置成空串（PAT `JS:114651`、device token `JS:114939`、外部 job token `JS:115056`），随后 `regenerateRuntimeFields()`（`JS:114927-114931`）调 WASM 导出 `generate_runtime_auth_fields`，喂 `{uid, organization_id, organization_tags, data_policy_agreed}`，拿回的就是这两个字段；再灌进 QoderContext（`JS:114891-114892`）由它原样回放。两者不入库（`JS:234481` 持久化前剥掉），每次 token 刷新重算（`JS:115126-115128`、`JS:115145-115147`） | 本地现算：AES-CBC 加密 userInfo 得 `info`、RSA 加密 AES key 得 `Cosy-Key`（helper `cosy.ts:212-226`，调用点 `cosy.ts:299`、`cosy.ts:308-309`）。**方案同构**，差的是被加密的明文：插件塞 `{uid, security_oauth_token, name, aid, email}`（`cosy.ts:300-306`），官方塞上面那四个键 | `预言机:"replays the credential-supplied user info and key verbatim"`（只证 QoderContext 原样回放，不证来源）；`JS:114927-114931`、`JS:114651`、`JS:114939`、`JS:115056`、`JS:234481`。`预言机:"derives encrypt_user_info and key locally from the user info object"` 与 `预言机:"produces a different pair on every call for the same input"`（两条常驻用例，见下方面 5 说明）；实测结论：输出恰为 `{encrypt_user_info, key}` 两键；`key` 恒 172 个 base64 字符 = 128 字节 = RSA-1024 密文，与 `cosy.ts:7-12` 那把 1024 位公钥同宽；`encrypt_user_info` 的长度恒等于 PKCS7(输入 JSON 字节数)——86→128、102→152、118→172、175→236 个 base64 字符，即 **WASM 原样加密 JS 交给它的 JSON，不筛字段也不重塑**；同一输入连调两次密文不同（每次换随机 key/IV） | 中 | **必须对齐。**面 5 已证插件拿得到官方放进去的每一项：`uid` 来自 `/api/v1/userinfo`（`pat.ts:124`），`organization_id` / `organization_tags` 就在同一个响应里、官方也是从那儿取的（`JS:115002`），只是 `pat.ts:118-126` 没读（见差异第 49 行）；`data_policy_agreed` 是本地设置（插件已有 `Cosy-Data-Policy`，`cosy.ts:18`）。**没有任何阻碍，所以不是"不能对齐"。**要改两处：明文换成官方那四个键（别再把 bearer token 塞进 `info`），以及每凭据算一次而不是每请求算一次（见差异第 50 行） |
 | 15 | 1 | 端点解析 | 动态发现：`/api/v3/service/region/endpoints` 与 `/api/v4/service/region/endpoints`，配 `/algo/api/v1/ping` 健康检查与端点缓存（`JS:77297`） | 硬编码 `api3.qoder.sh` / `gateway.qoder.com.cn`（`cosy.ts:83-93`） | `JS:77297` | 中 | 必须对齐（无阻碍：同一套凭据即可调该端点） |
 
@@ -345,33 +345,49 @@ messages, tools, parameters, chat_context, model_config, business`
 
 **唯一一条建议插队到最前面的是第 40 行（响应解密）**：它对明文恒等，今天零行为变化，改动面只有 `models.ts:166` 与 `usage.ts:50` 两处，却把"服务端改成编码返回"这个随时可能发生的事从"满屏乱码"变成"无事发生"。
 
-### 第二阶段第一批：已改 8 条，待真实请求验证
+### 第二阶段第一批：已改 15 条，待真实请求验证
 
-以下 8 条已经落地，`npm test` 349 条全绿、`npm run audit:oracle` 10 条全绿、`npm run lint` 干净：
+`npm test` 359 条全绿、`npm run audit:oracle` 10 条全绿、`npm run lint` 干净、`npm run build` 通过。
+
+**面 1 的请求头现在与官方逐个头名、逐个大小写一致，两个请求类都对齐了。**锁定套件的
+`missing` 数组在 auth 与 infer 两类下都是空数组，`extra` 在 auth 下是空数组、在 infer 下只剩
+故意不冻结的 `Cosy-MachineHostname`。
 
 | 行 | 改了什么 | 离线证据 |
 | --- | --- | --- |
 | 40 | 目录与配额响应过一遍解码（`qoderDecodeBody` / `parseQoderJsonBody`） | 解码器对冻结的官方 WASM 输出逐例还原；`models-cache.test.ts` 用编码正文喂生产路径 |
 | 1 | `model/list` 恢复 `/algo` 与 `Encode=1` | `cosy.test.ts` 两条红灯转绿；新增按 `V.catalogRequest.url` 断言的用例 |
 | 2 | `Cosy-Version` 1.1.3 → 1.1.23（请求头与被签名载荷两处） | 锁定用例对 `V.inferRequest.headers` 与 `V.signature.payload` 双向断言 |
-| 3 | 四个头名改成官方拼法 | 锁定用例的大小写数组现在是空数组 |
+| 3 | 四个头名改成官方拼法 | 锁定用例的大小写数组在两类下都是空数组 |
 | 4 | `Cosy-Machineos` → `Cosy-MachineOS` | 同上 |
-| 5 | 补 `Cosy-Business-Product` / `-Type` / `Cosy-Scene` | 锁定用例的缺失数组只剩 `Connection` |
-| 7 | 删 `Cosy-Bodyhash` / `-Bodylength` / `Cosy-Sigpath` | 锁定用例的多发数组少了这三个 |
+| 5 | 补 `Cosy-Business-Product` / `-Type` / `Cosy-Scene` | 锁定用例的缺失数组两类下都空了 |
+| 7 | 删 `Cosy-Bodyhash` / `-Bodylength` / `Cosy-Sigpath` | 锁定用例的多发数组 |
+| 6 | infer 补 `Connection: keep-alive` | 同上 |
+| 8 | 删两个恒空的组织头 | 同上 |
+| 9 | 删 `X-Request-Id` | 同上 |
+| 10 | `Cosy-ClientIp` 改成只在 auth 类发、值取 machineId | `锁定:"keeps Cosy-ClientIp and Accept-Encoding on the auth class only"` |
+| 11 | `Accept-Encoding: identity` 从 infer 挪到 auth | 同上 |
+| 12 | auth GET 补 `Content-Type` | 锁定套件现在**两个请求类都比**，这类漏洞不会再有 |
+| 13 | infer 发 `Cosy-MachineHostname`，含官方的规范化 | 七条用例覆盖 punycode / slug+hash / 96 字符截断 / 空值不发头 |
 | 50 | `info` / `Cosy-Key` 改成每凭据算一次 | 三条用例钉住"同凭据稳定 / 换 token 重算 / requestId 仍每请求变" |
 
+面 1 只剩第 15 行（端点动态发现）未做——它是一个独立特性，不属于头部这批。
 第 49 行只改了一半（uid 与 name 的别名），组织字段那半与第 14 行一并挂起。
 
-**第 14 行（改 `info` 明文）本轮有意不做。**它是这一批里唯一无法离线举证的：预言机只能证明加密形状，
+**第 14 行（改 `info` 明文）有意不做。**它是唯一无法离线举证的：预言机只能证明加密形状，
 证明不了服务端解密后读哪些字段。官方明文里没有 `security_oauth_token`，但官方走的是另一条登录路径，
 不能据此推断插件删掉它也安全 —— 若服务端对 PAT/jobToken 会话依赖这个字段，改完每个请求都会 401。
-另有两处附带推断：`data_policy_agreed` 来自插件从不调用的 data-policy 接口，只能给默认值。
-决定：先用真实请求验证上面这 8 条，确认无回归后再单独动第 14 行，一次只变一个变量。
+另有一处附带推断：`data_policy_agreed` 来自插件从不调用的 data-policy 接口，只能给默认值。
+决定：先用真实请求验证上面这 15 条，确认无回归后再单独动第 14 行，一次只变一个变量。
 
 验证方法：跑一次正常对话（覆盖 `agent_chat_generation`）、一次 `omp models`（覆盖 `model/list`
 与新的解码路径）、一次用量查询（覆盖 `quota/usage`）。要看的是：没有 401/403，模型目录条数与改动前一致，
-流式输出正常。若出现 401，**第一嫌疑是第 2 行**（`Cosy-Version` 进了被签名的载荷），其次是第 7 行
-（服务端可能真的在读 `Cosy-Bodyhash`），两者都可以单独回滚定位。
+流式输出正常。
+
+**若出现 401，按嫌疑排序回滚定位**（每条都是独立 commit）：第 2 行（`Cosy-Version` 进了被签名的
+载荷，服务端可能校验版本）→ 第 7 行（服务端可能真在读 `Cosy-Bodyhash`）→ 第 9 行（`X-Request-Id`
+可能被用于幂等）→ 第 10/11 行（`Cosy-ClientIp` 从 `127.0.0.1` 变成 machineId）。
+若只是模型目录变空而请求没报错，先看第 1 行与第 40 行。
 
 ### 本轮遗留的待改项
 
