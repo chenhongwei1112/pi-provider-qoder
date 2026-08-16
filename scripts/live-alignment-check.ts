@@ -24,10 +24,11 @@ import {
   ProviderUserAgent,
 } from "../src/cosy.js";
 import type { AssistantMessage, AssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { buildChatRequest } from "../src/request.js";
 import { QoderEventTranslator } from "../src/events.js";
 import { SSEFramer } from "../src/sse.js";
 import { credentialsFromPat, isPatRefresh } from "../src/pat.js";
-import { parseQoderJsonBody, qoderEncodeBodyToBuffer } from "../src/qoder-encoding.js";
+import { parseQoderJsonBody, qoderDecodeBody, qoderEncodeBodyToBuffer } from "../src/qoder-encoding.js";
 
 const AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
 const MODEL = process.argv[2] || "lite";
@@ -285,6 +286,122 @@ async function checkChat(creds: Creds) {
   );
 }
 
+/**
+ * 第 4 步：用**生产的** `buildChatRequest` 造 body 打真实网关。
+ *
+ * 前三步的 chat 用的是手搓 body（照台账记录的官方形状），验的是头集与签名；面 2 改的是
+ * `buildChatRequest` 本身 —— 顶层键序、`system` 取值、`parameters` 的 reasoning 通道、
+ * `model_config` 的固定十键、`chat_context` 键序、消息里的 `contents`/`reasoning_content`/
+ * `tool_calls.index`、prompt cache 断点。这些字节全部进签名载荷，键序错一位就可能 400/401，
+ * 所以必须让真实网关判一次。
+ */
+async function checkProductionBody(creds: Creds) {
+  const context = {
+    messages: [{ role: "user", content: "reply with the single word: ok" }],
+    systemPrompt: "You are a terse assistant.",
+    tools: [],
+  } as unknown as Parameters<typeof buildChatRequest>[0]["context"];
+
+  const built = buildChatRequest({
+    model: { id: MODEL } as unknown as Parameters<typeof buildChatRequest>[0]["model"],
+    context,
+    options: undefined,
+    providerMode: mode,
+    identity: { userID: creds.userID, machineID: creds.machineID } as unknown as Parameters<
+      typeof buildChatRequest
+    >[0]["identity"],
+  });
+
+  // 解码回明文，报告生产 body 的实际形状（键序是签名的一部分）。
+  const decoded = JSON.parse(qoderDecodeBody(built.encodedBytes.toString("latin1")));
+  console.log(`      生产 body 顶层键序: ${Object.keys(decoded).join(" ")}`);
+  console.log(`      parameters: ${JSON.stringify(decoded.parameters)}`);
+  console.log(`      model_config 键序: ${Object.keys(decoded.model_config).join(" ")}`);
+  console.log(`      chat_context 键序: ${Object.keys(decoded.chat_context).join(" ")}`);
+
+  record(
+    "the production body carries the official top-level order and no invented keys",
+    Object.keys(decoded).indexOf("chat_context") === 6 &&
+      decoded.system === "You are a terse assistant." &&
+      !("code_language" in decoded) &&
+      !("chat_prompt" in decoded) &&
+      !("image_urls" in decoded) &&
+      !("thinking_config" in decoded.model_config),
+    `system=${JSON.stringify(decoded.system)}，chat_context 在第 ${Object.keys(decoded).indexOf("chat_context") + 1} 位`,
+  );
+
+  const headers = buildAuthHeaders(
+    built.encodedBytes,
+    built.chatURL,
+    {
+      userID: creds.userID,
+      authToken: creds.access,
+      name: creds.name || "",
+      email: creds.email || "",
+      machineID: creds.machineID,
+    },
+    "infer",
+  );
+
+  const res = await fetch(built.chatURL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Model-Key": built.qoderModel,
+      "X-Model-Source": built.modelSource,
+      ...headers,
+    },
+    body: built.encodedBytes,
+    signal: AbortSignal.timeout(120000),
+  });
+
+  if (!res.ok) {
+    record("the gateway accepts the production body", false, `${res.status} ${(await res.text().catch(() => "")).slice(0, 500)}`);
+    return;
+  }
+
+  const reader = res.body?.getReader();
+  if (!reader) {
+    record("the gateway accepts the production body", false, "no response body");
+    return;
+  }
+  const output = {
+    role: "assistant" as const,
+    content: [] as AssistantMessage["content"],
+    usage: { input: 0, output: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 },
+    stopReason: undefined as AssistantMessage["stopReason"],
+  } as unknown as AssistantMessage;
+  const eventStream = { push: () => {} } as unknown as AssistantMessageEventStream;
+  const translator = new QoderEventTranslator(output, eventStream, { thinkingEnabled: false });
+  const framer = new SSEFramer();
+  const decoder = new TextDecoder();
+  let terminated = false;
+  let chunks = 0;
+  while (chunks < 600) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks += 1;
+    for (const frame of framer.push(decoder.decode(value, { stream: true }))) {
+      if (translator.push(frame) === "done") {
+        terminated = true;
+        break;
+      }
+    }
+    if (terminated) break;
+  }
+  await reader.cancel().catch(() => {});
+  const stop = terminated ? translator.finalize() : undefined;
+  const text = output.content.find((c) => c.type === "text");
+  record(
+    "the gateway accepts the production body",
+    res.status === 200 && terminated && !!text,
+    `${res.status}，${chunks} 个分片，stopReason=${stop ?? "<未终止>"}，文本=${JSON.stringify(text && "text" in text ? text.text.slice(0, 40) : "")}`,
+  );
+}
+
 async function main() {
   console.log(`mode=${mode} model=${MODEL}\n`);
   const creds = await loadCreds();
@@ -292,6 +409,7 @@ async function main() {
   await checkModelList(creds);
   await checkUsage(creds);
   await checkChat(creds);
+  await checkProductionBody(creds);
 
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${"─".repeat(60)}`);
