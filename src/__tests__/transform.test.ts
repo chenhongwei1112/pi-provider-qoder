@@ -90,7 +90,7 @@ describe("transformMessagesForQoder", () => {
   it("passes through simple user string messages", () => {
     const msgs: Message[] = [{ role: "user", content: "hello" } as Message];
     const result = transformMessagesForQoder(msgs);
-    expect(result).toEqual([{ role: "user", content: "hello" }]);
+    expect(result).toEqual([{ role: "user", content: "hello", contents: [{ type: "text", text: "hello" }] }]);
   });
 
   it("skips assistant messages with error stopReason", () => {
@@ -177,7 +177,10 @@ describe("transformMessagesForQoder", () => {
     });
   });
 
-  it("handles assistant message with thinking block", () => {
+  it("sends assistant thinking as reasoning_content instead of inlining it into content", () => {
+    // Regression: this plugin used to wrap thinking in a literal
+    // `<thinking>…</thinking>` tag inside content. Reasoning has its own fields
+    // (pretty.mjs:111977-111980, pretty.mjs:112002).
     const msgs = [
       {
         role: "assistant",
@@ -188,8 +191,70 @@ describe("transformMessagesForQoder", () => {
       },
     ] as unknown as Message[];
     const result = transformMessagesForQoder(msgs);
-    expect(result[0].content).toContain("<thinking>let me think</thinking>");
-    expect(result[0].content).toContain("answer");
+    expect(result[0].content).toBe("answer");
+    expect(result[0].content).not.toContain("<thinking>");
+    expect(result[0].reasoning_content).toBe("let me think");
+  });
+
+  it("accumulates several thinking blocks into one reasoning_content", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "first " },
+          { type: "text", text: "answer" },
+          { type: "thinking", thinking: "second" },
+        ],
+      },
+    ] as unknown as Message[];
+    const result = transformMessagesForQoder(msgs);
+    expect(result[0].reasoning_content).toBe("first second");
+    expect(result[0].content).toBe("answer");
+  });
+
+  it("sends the thinking signature as reasoning_content_signature", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "hmm", thinkingSignature: "sig-abc" }],
+      },
+    ] as unknown as Message[];
+    const result = transformMessagesForQoder(msgs);
+    expect(result[0].reasoning_content_signature).toBe("sig-abc");
+  });
+
+  it("sends exactly these reasoning_item keys when nothing was redacted", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "hmm" }],
+      },
+    ] as unknown as Message[];
+    const result = transformMessagesForQoder(msgs);
+    expect(result[0].reasoning_item).toEqual({
+      type: "reasoning",
+      summary: [{ text: "hmm", type: "summary_text" }],
+    });
+  });
+
+  it("sends a redacted thinking payload as reasoning_item.encrypted_content", () => {
+    // pi keeps the opaque payload of a redacted block in `thinkingSignature`
+    // and puts a placeholder in `thinking`; upstream's shape for it is
+    // `redacted_thinking`, which carries no readable text
+    // (pretty.mjs:111981-111987).
+    const msgs = [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "[Reasoning redacted]", thinkingSignature: "cipher-1", redacted: true },
+          { type: "text", text: "answer" },
+        ],
+      },
+    ] as unknown as Message[];
+    const result = transformMessagesForQoder(msgs);
+    expect(result[0].reasoning_item).toEqual({ encrypted_content: "cipher-1", type: "reasoning" });
+    expect(result[0].reasoning_content).toBeUndefined();
+    expect(result[0].reasoning_content_signature).toBeUndefined();
   });
 
   it("handles toolResult messages", () => {
@@ -287,6 +352,7 @@ describe("transformMessagesForQoder", () => {
     expect(result[0]).toEqual({
       role: "assistant",
       content: "simple response",
+      contents: [{ type: "text", text: "simple response" }],
     });
   });
 
@@ -394,5 +460,125 @@ describe("transformMessagesForQoder", () => {
 
     expect(result.map((m) => m.role)).toEqual(["assistant", "tool"]);
     expect((result[1] as { tool_call_id: string }).tool_call_id).toBe("keep_1");
+  });
+
+  it("sends exactly these assistant message keys, in this order", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "answer" },
+          { type: "thinking", thinking: "hmm", thinkingSignature: "sig-abc" },
+          { type: "thinking", thinking: "[Reasoning redacted]", thinkingSignature: "cipher-1", redacted: true },
+          { type: "toolCall", id: "call_1", name: "read", arguments: {} },
+        ],
+      },
+    ] as unknown as Message[];
+    const result = transformMessagesForQoder(msgs);
+    expect(Object.keys(result[0] as object)).toEqual([
+      "role",
+      "content",
+      "contents",
+      "reasoning_content",
+      "reasoning_content_signature",
+      "reasoning_item",
+      "tool_calls",
+    ]);
+  });
+
+  it("sends exactly these assistant contents element keys, in this order", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "answer", cache_control: { type: "ephemeral" } }],
+      },
+    ] as unknown as Message[];
+    const result = transformMessagesForQoder(msgs);
+    const contents = result[0].contents as object[];
+    expect(contents).toHaveLength(1);
+    expect(Object.keys(contents[0])).toEqual(["type", "text", "cache_control"]);
+    expect(contents[0]).toEqual({ type: "text", text: "answer", cache_control: { type: "ephemeral" } });
+  });
+
+  it("omits contents on an assistant turn without a text block", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "hmm" }],
+      },
+    ] as unknown as Message[];
+    const result = transformMessagesForQoder(msgs);
+    expect("contents" in (result[0] as object)).toBe(false);
+  });
+
+  it("keeps the single-space placeholder for a thinking-plus-tool-calls turn", () => {
+    // Thinking no longer feeds content, so this turn now reaches the gateway
+    // workaround: a null content would make the gateway drop the message and
+    // orphan the following tool_result.
+    const msgs = [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "I should read the file" },
+          { type: "toolCall", id: "call_1", name: "read", arguments: {} },
+        ],
+      },
+    ] as unknown as Message[];
+    const result = transformMessagesForQoder(msgs);
+    expect(result[0].content).toBe(" ");
+    expect(result[0].reasoning_content).toBe("I should read the file");
+  });
+
+  it("sends exactly these tool_calls element keys, in this order, numbered from 0", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "call_1", name: "read", arguments: { path: "/a" } },
+          { type: "toolCall", id: "call_2", name: "bash", arguments: { command: "ls" } },
+        ],
+      },
+    ] as unknown as Message[];
+    const result = transformMessagesForQoder(msgs);
+    const toolCalls = result[0].tool_calls as Array<{ index: number }>;
+    expect(Object.keys(toolCalls[0] as object)).toEqual(["id", "type", "index", "function"]);
+    expect(toolCalls.map((tc) => tc.index)).toEqual([0, 1]);
+  });
+
+  it("sends user contents blocks alongside content for array content", () => {
+    const msgs = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "look at ", cache_control: { type: "ephemeral" } },
+          { type: "image", data: "abc123", mimeType: "image/png" },
+        ],
+      },
+    ] as unknown as Message[];
+    const result = transformMessagesForQoder(msgs);
+    expect(result[0].contents).toEqual([
+      { type: "text", text: "look at ", cache_control: { type: "ephemeral" } },
+      { type: "image_url", image_url: { url: "data:image/png;base64,abc123" } },
+    ]);
+    expect(result[0].contents).toEqual(result[0].content);
+  });
+
+  it("passes a user cache breakpoint through on image-free array content", () => {
+    const msgs = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "part1" },
+          { type: "text", text: "part2", cache_control: { type: "ephemeral" } },
+        ],
+      },
+    ] as unknown as Message[];
+    const result = transformMessagesForQoder(msgs);
+    expect(result[0].contents).toEqual([
+      { type: "text", text: "part1" },
+      { type: "text", text: "part2", cache_control: { type: "ephemeral" } },
+    ]);
+    // content stays the concatenation this plugin has always sent.
+    expect(result[0].content).toBe("part1part2");
   });
 });

@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type { Api, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { getQoderChatURL, getQoderCNDirectModel, isQoderCNMode, type QoderIdentity } from "./cosy.js";
 import { getCachedModelConfig } from "./models.js";
+import { applyPromptCacheBreakpoint } from "./prompt-cache.js";
 import { qoderEncodeBodyToBuffer } from "./qoder-encoding.js";
 import { transformMessagesForQoder, transformTools } from "./transform.js";
 
@@ -48,6 +49,126 @@ export interface QoderChatRequest {
 }
 
 /**
+ * The official reasoning effort vocabulary (`pretty.mjs:85158-85166`), minus
+ * `none`, which arrives through the disable path rather than as an effort.
+ */
+const REASONING_EFFORTS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Build the `parameters` object of a chat request.
+ *
+ * Mirrors the official gateway path: `parameters` starts out empty, `max_tokens`
+ * is written first (`pretty.mjs:132110-132111`), then the reasoning keys are
+ * patched in (`pretty.mjs:132112-132118`). This is the carrier the server reads:
+ * `model_config.thinking_config` and `chat_context.extra.modelConfig.thinking_effort`
+ * are not part of the official body at all, so an effort shaped into either of
+ * them is silently dropped.
+ *
+ * The official builder can also carry `temperature` / `top_p` / `top_k` /
+ * `preserve_thinking` / `context_length` / `tool_choice`
+ * (`pretty.mjs:121989-122005`, `pretty.mjs:132120-132121`), but only once the
+ * caller configured a generation preference; omp exposes none of those knobs, so
+ * the default path here is the official default path. `reasoning_budget_tokens`
+ * is likewise written only for a positive explicit thinking budget
+ * (`pretty.mjs:132116`) -- omp has no such input, so that condition can never
+ * hold and its absence is alignment, not an omission.
+ */
+export function buildChatParameters(args: {
+  maxTokens: number;
+  /** A value from the official effort vocabulary, or undefined when unrequested. */
+  reasoningEffort?: string;
+  /** The caller asked for thinking to be off. */
+  thinkingDisabled: boolean;
+}): Record<string, unknown> {
+  const { maxTokens, reasoningEffort, thinkingDisabled } = args;
+  const parameters: Record<string, unknown> = { max_tokens: maxTokens };
+  if (thinkingDisabled || reasoningEffort === "none") {
+    // `pretty.mjs:132115`: effort `none` pins `enable_thinking` to false and
+    // drops any budget key.
+    parameters.reasoning_effort = "none";
+    parameters.enable_thinking = false;
+  } else if (reasoningEffort) {
+    parameters.reasoning_effort = reasoningEffort;
+    parameters.enable_thinking = true;
+  }
+  return parameters;
+}
+
+/**
+ * `pretty.mjs:132119`: a turn that switches thinking off also reports
+ * `model_config.is_reasoning: false`, whatever the catalog entry claims.
+ */
+export function effectiveIsReasoning(
+  catalogIsReasoning: boolean,
+  thinkingDisabled: boolean,
+  reasoningEffort?: string,
+): boolean {
+  if (thinkingDisabled || reasoningEffort === "none") return false;
+  return catalogIsReasoning;
+}
+
+/** Cap qodercli falls back to when a model's `max_output_tokens` is unusable (`pretty.mjs:105460`). */
+const QODER_DEFAULT_MAX_TOKENS = 32000;
+
+/** Context window qodercli falls back to when a catalog entry has none (`pretty.mjs:132131`). */
+const QODER_DEFAULT_MAX_INPUT_TOKENS = 200000;
+
+/**
+ * Screen a cached `max_output_tokens` down to a usable cap, matching the
+ * official helper (`pretty.mjs:105458-105460`): a number is taken as is, a
+ * non-blank string is parsed, anything else becomes NaN; the result is kept only
+ * when it is a positive safe integer, otherwise the cap falls back to 32000.
+ *
+ * Both halves are load-bearing. The value comes from getCachedModelConfig,
+ * which hands back `data.configs[key]` verbatim from the on-disk cache
+ * (`models.ts:52-62`), and updateQoderModelsCache persists whatever the server
+ * sent (`models.ts:188`), so a negative or corrupted value is reachable. A
+ * plain `value || 32000` would not catch one: a negative number is truthy, so
+ * it would go out as `max_tokens: -1` and be hashed into `request_set_id` as
+ * `mt=-1`.
+ */
+export function clampMaxTokens(value: unknown): number {
+  let n: number;
+  if (typeof value === "number") n = value;
+  else if (typeof value === "string" && value.trim().length > 0) n = Number(value);
+  else n = Number.NaN;
+  return Number.isSafeInteger(n) && n > 0 ? n : QODER_DEFAULT_MAX_TOKENS;
+}
+
+/**
+ * Build the fixed ten-key `model_config` the official client sends
+ * (`pretty.mjs:132131`).
+ *
+ * Every field is either read off the catalog entry or defaulted, so entry fields
+ * the server ships now or later (`thinking_config`, `server_scene`, ...) cannot
+ * ride back onto the wire the way handing the cached entry over did.
+ * `is_reasoning` is a parameter because the thinking switches decide it
+ * (`pretty.mjs:132119`), outside this function.
+ *
+ * The official BYOK / `custom_model` branches (`pretty.mjs:132132-132138`) are
+ * not ported: omp has no BYOK path, so the entry is always a service model.
+ */
+export function buildModelConfig(
+  entry: Record<string, unknown> | null | undefined,
+  modelID: string,
+  isReasoning: boolean,
+): Record<string, unknown> {
+  const key = entry?.key ?? modelID;
+  return {
+    key,
+    display_name: entry?.display_name ?? key,
+    model: "",
+    format: entry?.format ?? "openai",
+    is_vl: entry?.is_vl ?? false,
+    is_reasoning: isReasoning,
+    api_key: "",
+    url: "",
+    source: entry?.source ?? "system",
+    max_input_tokens: entry?.max_input_tokens ?? QODER_DEFAULT_MAX_INPUT_TOKENS,
+  };
+}
+
+/**
  * Build the chat request body and everything the transport needs to send it.
  *
  * Pure with respect to the network: it reads the model cache and hashes the
@@ -70,23 +191,32 @@ export function buildChatRequest(args: {
       qoderModel === "performance" ||
       qoderModel.includes("dmodel") ||
       qoderModel.includes("dfmodel"),
-    max_output_tokens: 32768,
+    max_output_tokens: QODER_DEFAULT_MAX_TOKENS,
     source: "system",
   };
   modelConfig.key = qoderModel;
 
-  const isReasoning = !!modelConfig.is_reasoning;
-  const maxOutputTokens = modelConfig.max_output_tokens || 32768;
-  // Map omp thinking level to qoder server effort string
+  const maxOutputTokens = clampMaxTokens(modelConfig.max_output_tokens);
+  // Map omp's thinking option onto the official effort vocabulary
+  // (`pretty.mjs:85158-85166`). The declared `ThinkingLevel` is narrower than
+  // what actually arrives -- `--thinking off` reaches here as the
+  // `ModelThinkingLevel` token "off", and "max" is outside the declared union
+  // too -- so the option is read as `unknown` and the tokens are matched as
+  // data. An unrecognized value leaves both signals unset, which is the
+  // official default path: no reasoning keys in `parameters` at all.
+  const reasoningVal: unknown = options?.reasoning;
+  const thinkingDisabled = reasoningVal === false || reasoningVal === "off" || reasoningVal === "none";
   let thinkingEffort: string | undefined;
-  const reasoningVal = options?.reasoning;
-  if (reasoningVal !== false && reasoningVal !== "off" && reasoningVal !== undefined && reasoningVal !== null) {
-    const r = String(reasoningVal);
-    if (r === "minimal") thinkingEffort = "low";
-    else if (["low", "medium", "high", "xhigh", "max"].includes(r)) thinkingEffort = r;
+  if (!thinkingDisabled && typeof reasoningVal === "string") {
+    if (reasoningVal === "minimal") thinkingEffort = "low";
+    else if (REASONING_EFFORTS.includes(reasoningVal)) thinkingEffort = reasoningVal;
   }
+  const isReasoning = effectiveIsReasoning(!!modelConfig.is_reasoning, thinkingDisabled, thinkingEffort);
 
-  const normalizedMessages = transformMessagesForQoder(context.messages);
+  // `pretty.mjs:112274`: official marks the prompt cache breakpoint on the
+  // pi-shaped array BEFORE the per-role transform, so the marker rides along
+  // into the transformed `contents` entries (ledger row 25).
+  const normalizedMessages = transformMessagesForQoder(applyPromptCacheBreakpoint(context.messages));
   // omp hands `systemPrompt` over as an array of prompt segments, while the
   // `pi-ai` types omp injects into extensions still declare it as `string`.
   // Measured as an array under the default prompt, `--system-prompt`, and
@@ -118,60 +248,24 @@ export function buildChatRequest(args: {
   const stablePart = stableID("qoder-session", [identity.userID, qoderModel]);
   const sessionID = options?.sessionId ? `${stablePart}-${options.sessionId}` : `${stablePart}-${crypto.randomUUID()}`;
 
-  // Do not collapse this guard. maxOutputTokens is `modelConfig.max_output_tokens
-  // || 32768`, which only screens out FALSY values -- a negative number is truthy
-  // and passes straight through. modelConfig comes from getCachedModelConfig,
-  // which hands back `data.configs[key]` verbatim from the on-disk cache
-  // (models.ts:60-62), and updateQoderModelsCache persists whatever the server
-  // sent (models.ts:188). So a negative or corrupted value is reachable, and
-  // without this guard it would be sent as `max_tokens` and hashed into
-  // request_set_id as `mt=-1`.
-  let maxTokens = 32768;
-  if (maxOutputTokens > 0) {
-    maxTokens = maxOutputTokens;
-  }
+  // clampMaxTokens already screened the cached cap, so only a smaller caller cap
+  // can still lower it.
+  let maxTokens = maxOutputTokens;
   if (options?.maxTokens && options.maxTokens < maxTokens) {
     maxTokens = options.maxTokens;
   }
 
   const toolsRaw = context.tools && context.tools.length > 0 ? transformTools(context.tools) : undefined;
   const recordID = chatRecordID(qoderModel, normalizedMessages, toolsRaw, maxTokens);
-  // If a thinking effort is requested or thinking should be disabled, patch
-  // model_config to signal the preference via is_default on the appropriate
-  // slot in thinking_config.
-  let effectiveModelConfig: Record<string, unknown> = modelConfig as Record<string, unknown>;
-  if (isReasoning) {
-    const tc = (modelConfig as Record<string, unknown>).thinking_config;
-    if (tc && typeof tc === "object") {
-      const wantOff = reasoningVal === false || reasoningVal === "off";
-      if (wantOff && (tc as Record<string, unknown>).disabled !== undefined) {
-        // --thinking off: preserve both blocks, signal disabled via is_default
-        effectiveModelConfig = {
-          ...(modelConfig as Record<string, unknown>),
-          thinking_config: {
-            disabled: { ...((tc as Record<string, unknown>).disabled as object), is_default: true },
-            enabled: { ...((tc as Record<string, unknown>).enabled as object), is_default: false },
-          },
-        };
-      } else if (thinkingEffort && (tc as Record<string, unknown>).enabled !== undefined) {
-        const enabled = (tc as Record<string, unknown>).enabled as Record<string, unknown>;
-        const efforts = enabled.efforts as Record<string, unknown> | undefined;
-        if (efforts && typeof efforts === "object") {
-          const patchedEfforts: Record<string, unknown> = {};
-          for (const key of Object.keys(efforts))
-            patchedEfforts[key] = { ...(efforts[key] as object), is_default: key === thinkingEffort };
-          effectiveModelConfig = {
-            ...(modelConfig as Record<string, unknown>),
-            thinking_config: {
-              ...tc,
-              enabled: { ...enabled, efforts: patchedEfforts },
-            },
-          };
-        }
-      }
-    }
-  }
 
+  // Key order is the official one (`pretty.mjs:132123`). It is load-bearing:
+  // the COSY signature covers the encoded body, so `JSON.stringify`'s insertion
+  // order is part of the signed bytes. `chat_context` sits 7th and `model_config`
+  // 16th here, not last as they used to (ledger row 16).
+  //
+  // Official also has `custom_model` (16th) and a conditional `patches`; both are
+  // BYOK/edit-mode only and `undefined` on this path, where `JSON.stringify`
+  // drops them, so omitting them is wire-equivalent (ledger row 111).
   const reqBody: Record<string, unknown> = {
     request_id: crypto.randomUUID(),
     request_set_id: recordID,
@@ -179,40 +273,43 @@ export function buildChatRequest(args: {
     session_id: sessionID,
     stream: true,
     chat_task: "FREE_INPUT",
+    chat_context: {
+      // `pretty.mjs:132178`. `text` and `originalContent` carry the same value.
+      text: lastUserText,
+      features: [],
+      extra: {
+        context: [],
+        // Exactly two keys. The `thinking_effort` this used to add does not
+        // exist anywhere in the official bundle (ledger row 21); reasoning
+        // effort travels in `parameters` instead.
+        modelConfig: {
+          key: qoderModel,
+          is_reasoning: isReasoning,
+        },
+        originalContent: lastUserText,
+      },
+      chatPrompt: "",
+      imageUrls: null,
+    },
     is_reply: true,
     is_retry: false,
     source: 1,
     version: "3",
-    session_type: "qodercli",
     agent_id: "agent_common",
     task_id: "common",
-    code_language: "",
-    chat_prompt: "",
-    image_urls: null,
+    session_type: "qodercli",
     aliyun_user_type: "",
-    // Qoder's server ignores the top-level `system` field (verified: the
-    // model never sees it). Inject the system prompt as a leading
-    // role:system message instead, which the server does honor.
-    system: "",
+    model_config: buildModelConfig(modelConfig, qoderModel, isReasoning),
+    // Official sends the prompt in BOTH places: the top-level field and a
+    // leading system message (`pretty.mjs:132108` + `pretty.mjs:132123`). The
+    // old comment here claimed the server ignores the top-level field, which is
+    // true but beside the point — a request whose `system` is empty while
+    // `messages[0].role === "system"` is a distinguishable client fingerprint
+    // (ledger row 18).
+    system: systemText,
     messages: systemText ? [{ role: "system", content: systemText }, ...normalizedMessages] : normalizedMessages,
     tools: toolsRaw || [],
-    parameters: { max_tokens: maxTokens },
-    chat_context: {
-      chatPrompt: "",
-      imageUrls: null,
-      extra: {
-        context: [],
-        modelConfig: {
-          key: qoderModel,
-          is_reasoning: isReasoning,
-          ...(thinkingEffort ? { thinking_effort: thinkingEffort } : {}),
-        },
-        originalContent: lastUserText,
-      },
-      features: [],
-      text: lastUserText,
-    },
-    model_config: effectiveModelConfig,
+    parameters: buildChatParameters({ maxTokens, reasoningEffort: thinkingEffort, thinkingDisabled }),
     business: {
       product: "cli",
       version: "1.0.0",
