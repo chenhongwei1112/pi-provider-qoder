@@ -291,16 +291,26 @@ export function getMachineId(): string {
   return newId;
 }
 
-export function buildAuthHeaders(
-  body: Buffer | string | null,
-  requestURL: string,
-  creds: CosyCredentials,
-): Record<string, string> {
-  if (!creds.userID) {
-    throw new Error("cosy: user id is empty");
-  }
-  if (!creds.authToken) {
-    throw new Error("cosy: auth token is empty");
+/**
+ * `info` 与 `Cosy-Key` 的生命周期：**每凭据一次**，不是每请求一次（台账差异第 50 行）。
+ *
+ * 官方只在登录与 token 刷新时调 `regenerateRuntimeFields()`
+ * （`pretty.mjs:114927-114931`），算出的一对灌进 QoderContext，此后每个请求原样回放。
+ * 插件此前每个请求都现摇一个随机 AES key，于是每个请求的 `Cosy-Key` 都不同 —— 这在
+ * 服务端是能看出来的：预言机实测官方的 `generate_runtime_auth_fields` 同输入两次调用
+ * 密文也不同（`scripts/__tests__/cosy-oracle.test.mjs` 的
+ * "produces a different pair on every call for the same input"），所以"每请求都换一对"
+ * 只可能是重算，不可能是回放。
+ *
+ * 按凭据缓存即等价于官方的时机：key 里带上 authToken，token 一换（登录或刷新）就自然
+ * 重算。缓存只保留最后一条，因为同一进程里同时活跃多个 Qoder 凭据不是现实场景。
+ */
+let runtimeAuthCache: { key: string; infoB64: string; cosyKey: string } | undefined;
+
+function runtimeAuthFields(creds: CosyCredentials): { infoB64: string; cosyKey: string } {
+  const cacheKey = `${creds.userID}\n${creds.authToken}\n${creds.name || ""}\n${creds.email || ""}`;
+  if (runtimeAuthCache?.key === cacheKey) {
+    return { infoB64: runtimeAuthCache.infoB64, cosyKey: runtimeAuthCache.cosyKey };
   }
 
   const aesKey = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
@@ -314,6 +324,28 @@ export function buildAuthHeaders(
 
   const infoB64 = aesEncryptCBCBase64(JSON.stringify(userInfo), aesKey);
   const cosyKey = rsaEncryptBase64(aesKey);
+  runtimeAuthCache = { key: cacheKey, infoB64, cosyKey };
+  return { infoB64, cosyKey };
+}
+
+/** 测试用：清掉每凭据缓存，让下一次调用重新算一对。 */
+export function resetRuntimeAuthCache(): void {
+  runtimeAuthCache = undefined;
+}
+
+export function buildAuthHeaders(
+  body: Buffer | string | null,
+  requestURL: string,
+  creds: CosyCredentials,
+): Record<string, string> {
+  if (!creds.userID) {
+    throw new Error("cosy: user id is empty");
+  }
+  if (!creds.authToken) {
+    throw new Error("cosy: auth token is empty");
+  }
+
+  const { infoB64, cosyKey } = runtimeAuthFields(creds);
 
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const requestId = crypto.randomUUID();
