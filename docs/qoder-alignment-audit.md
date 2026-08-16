@@ -474,13 +474,20 @@ chat_context:    text features extra chatPrompt imageUrls
 | 51 | **已修（推导部分）** | 新增 `deriveMachineIdFromHardware()` 逐行复刻官方公式。但本机 `/sys/class/dmi/id/product_uuid` 是 root-only，Node 插件读不到 → 本机仍回退随机；只在 DMI 可读的部署上生效。官方原子落盘未移植（omp 无并发共享场景） |
 | 15 | **改判「无需对齐」** | 发现服务**已实测下线**：v3/v4 × 3 host × `/algo` 前缀 × 带 token 八组合全 404；bundle 的 prod host `api2-v2.qoder.sh` 连 ping 都 404。两个活 region 延迟实质相同（api2 45.2ms / api3 43.7ms），硬编码 api3 无性能损失。发现步骤留在 live 脚本作信息性监控 |
 
-**第 52、53 行有意不改**，理由与最初拦下第 14 行同源：
+**第 52、53 行后来已完成**——堵点不是"不能改"而是"不能盲改"，用 curl 实测服务端后全部落地：
 
-- 台账第 52 行的判定依据是「插件的刷新端点在官方 bundle 里**命中 0 次**」。这正是本审计要消灭的
-  「用 `strings` 命中数下结论」——命中 0 证明不了端点已变，可能只是那条代码路径没被走到。
-- 这两条都在 **device-flow 登录路径**上，改错的后果是登录断掉，而我**无法用真实凭据离线验证**
-  （device flow 要交互授权）。第 53 行的 `client_id` 与第 52 行的端点体都一样：证据停在字符串搜索层。
-- 在能离线举证之前（例如抓一次官方 device flow 的真实请求），这两条维持现状。
+- 插件旧 refresh 端点实测 **403 Request discarded**（确证已死）；官方 `/api/v1/deviceToken/refresh`
+  活着：缺 body → 400 `refresh_token is required`，假体 → 400 `must start with drt-`，`drt-` 假体 → 401。
+  端点、体形状、token 前缀语义全部钉到鉴权边界。失败语义改成官方那样抛错，不再静默延期。
+- 授权页带不带 `client_id` 实测都 200 且字节相同（服务端不强制），补上只为对齐；轮询端点等待中
+  实测 404 `Not found`，与官方"只把 404 当 pending"吻合。
+- poll 响应字段与官方逐一对上（`token`/`user_id`/`refresh_token`/`expires_at`/`expires_in`），
+  并补上官方直接读的 `user_name`（`JS:114939`）。
+
+**仍无法离线闭环的一段**：真实端到端 device flow（浏览器完成授权 → poll 拿到真 token → 用真 `drt-`
+refresh token 刷新成功）。这需要一次人工浏览器登录，curl 给不了。另外发现而未动的一处：device flow
+登录后官方调的是 `fetchAuthStatus` 而非 `/api/v1/userinfo`，插件用 device token 调 userinfo 是否被接受
+未验证（best-effort，失败只是 name/email 为空，不阻塞登录）。
 
 ### 本轮遗留的待改项
 

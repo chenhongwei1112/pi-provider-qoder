@@ -164,6 +164,9 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
       const tokenData = (await response.json()) as {
         token: string;
         user_id: string;
+        /** Official reads the display name straight off the poll response
+         *  (`pretty.mjs:114939`), no extra request. */
+        user_name?: string;
         refresh_token: string;
         expires_at?: string;
         expires_in?: number;
@@ -175,10 +178,14 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
 
       const expireMs = parseExpiresAt(tokenData.expires_at, tokenData.expires_in);
 
-      // Fetch user info (best effort)
+      // Fetch user info (best effort). Note: official does NOT call
+      // `/api/v1/userinfo` with a device token — it builds identity from the
+      // poll response (`pretty.mjs:114932-114941`) and then calls
+      // `fetchAuthStatus`. Whether userinfo accepts a device token is unverified,
+      // so the poll's `user_name` is the primary source and this only fills gaps.
       getProgress(callbacks)?.("Fetching user profile...");
       let email = "";
-      let name = "";
+      let name = tokenData.user_name || "";
       try {
         const userinfoRes = await fetch("https://openapi.qoder.sh/api/v1/userinfo", {
           method: "GET",
