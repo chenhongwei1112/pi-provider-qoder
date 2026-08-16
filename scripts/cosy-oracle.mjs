@@ -22,6 +22,9 @@ export function findAuditDir() {
 export async function createOracle({ auditDir, machineId, uid, encryptUserInfo, key, cosyVersion }) {
   const glue = await import(`file://${resolve(auditDir, "glue.mjs")}`);
   glue.initEnvModule();
+  // `initWasmModule()` 实测是冗余的（去掉它 `initWasm()` 依然能跑通），但保留是故意的：
+  // 不去依赖 carved glue 里「访问导出会顺带触发模块初始化」这个未声明的内部行为。
+  // 官方换个构建方式就可能变，显式按序初始化的代价是一行。
   glue.initWasmModule();
   await glue.initWasm();
 
