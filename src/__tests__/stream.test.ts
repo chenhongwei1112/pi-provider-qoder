@@ -5,6 +5,7 @@ import type {
   AssistantMessageEventStream,
   Context,
   Model,
+  ThinkingContent,
   ToolCall,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -109,9 +110,9 @@ interface ChunkedFetch {
  *
  * `mockFetch` builds `new Response(<complete string>)`, which undici hands over
  * in a single read, so the read loop in `stream.ts` runs exactly once and three
- * of its obligations are never exercised: threading `splitSSEData`'s `rest`
- * (`stream.ts:103`), streaming UTF-8 decoding (`stream.ts:101`), and re-arming
- * the idle watchdog per chunk (`stream.ts:98`).
+ * of its obligations are never exercised: threading the framer's incomplete
+ * tail line (`stream.ts:101`), streaming UTF-8 decoding (`stream.ts:101`), and
+ * re-arming the idle watchdog per chunk (`stream.ts:98`).
  *
  * `cuts` are *byte* offsets, not character offsets, precisely so a cut can land
  * inside a multi-byte sequence — the split a `TextDecoder` without
@@ -539,7 +540,7 @@ describe("streamQoder", () => {
   }, 5000);
 
   it("stops consuming payloads that follow the wrapped [DONE] in the same chunk", async () => {
-    // splitSSEData is greedy: it hands back every complete `data:` line in the
+    // The framer is greedy: it hands back every complete event block in the
     // buffer and knows nothing about [DONE], so the orchestration loop is what
     // has to stop at the terminator. The loop it replaced broke there. Both
     // trailing envelopes are observable if they are wrongly processed: the
@@ -750,5 +751,129 @@ describe("streamQoder", () => {
     expect(msg?.stopReason).toBe("stop");
     const text = msg?.content.find((c) => c.type === "text");
     expect(text && "text" in text ? text.text : "").toBe("slow but healthy");
+  });
+});
+
+/**
+ * Face-3 combination smoke: every behaviour the five alignment slices added,
+ * layered into one stream and driven through the real `streamQoder` entry.
+ *
+ * Each slice verified its own path in isolation. Nothing verified them
+ * together, and they all edited `events.ts` concurrently — so the risk this
+ * covers is a call site being dropped during the merge, not the individual
+ * semantics.
+ */
+describe("face 3 alignment, end to end", () => {
+  it("frames, classifies, and translates every channel the official client sends", async () => {
+    const body =
+      // A comment line, an `id:`/`event:` pair, and a heartbeat blank line:
+      // the old line-based framer dropped all of these.
+      ":ok\n" +
+      "event:message\nid:7\n" +
+      sseEnvelope(chunk({ role: "assistant" })) +
+      // Credit notification — the one real functional gap row 33 closed.
+      'data:[NOTIFICATIONS]#{"notifications":[{"notificationType":"credit_exhausted"}]}\n\n' +
+      // Quota sentinels: official has no consumer either, must not kill the stream.
+      "data:[NOT_EXCEED_QUOTA]\n\n" +
+      "data:[EXCEED_QUOTA] 0 left\n\n" +
+      "\n" +
+      // reasoning_item.summary joins into the thinking block (row 36).
+      sseEnvelope(chunk({ reasoning_item: { summary: [{ text: "weigh " }, { text: "options" }] } })) +
+      // An opaque signature lands on that thinking block (row 36).
+      sseEnvelope(chunk({ signature: "SIG-1" })) +
+      sseEnvelope(chunk({ content: "done thinking" })) +
+      // Legacy function_call with no tool_calls gets synthesised (row 37),
+      // and its arguments arrive truncated (row 38).
+      sseEnvelope(chunk({ function_call: { arguments: '{"path":"/tmp/a.txt","body":"he', name: "write_file" } })) +
+      sseEnvelope(finishChunk("tool_calls")) +
+      DONE_SSE;
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    globalThis.fetch = mockFetch(body);
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+    // Read the calls before restoring: vitest's `mockRestore` clears them.
+    const warned = warn.mock.calls.flat().join(" ");
+    warn.mockRestore();
+
+    const done = events.find((e) => e.type === "done");
+    expect(done, "expected a done event, not an error").toBeDefined();
+    const msg = (done as { message: AssistantMessage }).message;
+
+    // Row 33: the credit notification reached the user.
+    expect(warned).toMatch(/credit_exhausted/);
+
+    // Row 36: summary joined, signature attached, exactly one thinking block.
+    const thinking = msg.content.filter((c) => c.type === "thinking") as ThinkingContent[];
+    expect(thinking).toHaveLength(1);
+    expect(thinking[0].thinking).toBe("weigh options");
+    expect(thinking[0].thinkingSignature).toBe("SIG-1");
+
+    // Rows 37 + 38: the legacy fragment became a usable call with repaired args.
+    const calls = msg.content.filter((c) => c.type === "toolCall") as ToolCall[];
+    expect(calls).toHaveLength(1);
+    expect(calls[0].name).toBe("write_file");
+    expect(calls[0].arguments).toEqual({ body: "he", path: "/tmp/a.txt" });
+    expect(msg.stopReason).toBe("toolUse");
+  });
+
+  it("exempts a non-200 frame carrying event: finish, and fails a bare one", async () => {
+    // Row 34: official exempts `event: finish` from the error branch
+    // (pretty.mjs:132793). The plugin used to drop `event:` entirely, so such a
+    // frame became a hard error.
+    const exempt =
+      "event:finish\n" +
+      sseEnvelope({ message: "stream finished" }, 499, "Client Closed") +
+      sseEnvelope(chunk({ content: "kept" })) +
+      sseEnvelope(finishChunk("stop")) +
+      DONE_SSE;
+
+    globalThis.fetch = mockFetch(exempt);
+    let events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+    expect(
+      events.find((e) => e.type === "error"),
+      "event: finish must be exempt",
+    ).toBeUndefined();
+    const kept = events.find((e) => e.type === "done") as { message: AssistantMessage };
+    expect(kept.message.content.some((c) => c.type === "text" && c.text === "kept")).toBe(true);
+
+    // Same status without the `event: finish` marker still has to fail.
+    globalThis.fetch = mockFetch(sseEnvelope({ message: "upstream is angry" }, 499, "Client Closed"));
+    events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+    const err = events.find((e) => e.type === "error") as { error: AssistantMessage };
+    expect(err, "a bare non-200 must still fail").toBeDefined();
+    expect(err.error.errorMessage).toMatch(/upstream is angry/);
+  });
+
+  it("reports a context window overflow instead of a silent truncated stop", async () => {
+    // Row 35: this used to map to "stop", so an overflowed turn looked complete
+    // with its output quietly cut short.
+    globalThis.fetch = mockFetch(
+      sseEnvelope(chunk({ content: "partial" })) + sseEnvelope(finishChunk("model_context_window_exceeded")) + DONE_SSE,
+    );
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    expect(
+      events.find((e) => e.type === "done"),
+      "must not report a clean stop",
+    ).toBeUndefined();
+    const err = events.find((e) => e.type === "error") as { error: AssistantMessage };
+    expect(err.error.stopReason).toBe("error");
+    expect(err.error.errorMessage).toMatch(/context window/i);
+  });
+
+  it("accepts a payload that arrives without the statusCodeValue wrapper", async () => {
+    // Row 34: official treats an unwrapped top-level object as the payload
+    // (pretty.mjs:132815). The plugin's `if (!innerStr) return "continue"`
+    // dropped it, losing the whole chunk.
+    globalThis.fetch = mockFetch(
+      `data:${JSON.stringify(chunk({ content: "unwrapped" }))}\n\n` +
+        `data:${JSON.stringify(finishChunk("stop"))}\n\n` +
+        DONE_SSE,
+    );
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+
+    const done = events.find((e) => e.type === "done") as { message: AssistantMessage };
+    expect(done, "expected a done event").toBeDefined();
+    expect(done.message.content.some((c) => c.type === "text" && c.text === "unwrapped")).toBe(true);
   });
 });

@@ -1,194 +1,145 @@
 import { describe, expect, it } from "vitest";
-import { splitSSEData } from "../sse.js";
+import { MAX_SSE_LINE_BYTES, SSEFramer, SSEProtocolLimitError } from "../sse.js";
 
-describe("splitSSEData", () => {
-  it("returns the payload of a single complete data line", () => {
-    const { payloads, rest } = splitSSEData("data:hello\n");
-    expect(payloads).toEqual(["hello"]);
-    expect(rest).toBe("");
+describe("SSEFramer", () => {
+  it("delivers a frame for a single data line followed by a blank line", () => {
+    const framer = new SSEFramer();
+    expect(framer.push("data:hello\n\n")).toEqual([{ data: "hello" }]);
   });
 
-  it("keeps an incomplete trailing line in rest", () => {
-    const { payloads, rest } = splitSSEData("data:first\ndata:seco");
-    expect(payloads).toEqual(["first"]);
-    expect(rest).toBe("data:seco");
+  it("joins several data lines of one block with newlines", () => {
+    const framer = new SSEFramer();
+    expect(framer.push("data:one\ndata:two\ndata:three\n\n")).toEqual([{ data: "one\ntwo\nthree" }]);
   });
 
-  it("returns every data line in one chunk, in order", () => {
-    const { payloads } = splitSSEData("data:a\n\ndata:b\n\ndata:c\n");
-    expect(payloads).toEqual(["a", "b", "c"]);
+  it("delivers nothing until the blank line arrives", () => {
+    const framer = new SSEFramer();
+    // The block is syntactically complete apart from its terminator, so a
+    // framer that delivered per line instead of per block would hand the
+    // translator half an event.
+    expect(framer.push("data:one\ndata:two\n")).toEqual([]);
+    expect(framer.push("\n")).toEqual([{ data: "one\ntwo" }]);
   });
 
-  it("drops lines that are not data fields", () => {
-    // `event:` and comment lines (`:`) are valid SSE the provider does not use.
-    const { payloads } = splitSSEData("event:message\n:heartbeat\ndata:kept\n");
-    expect(payloads).toEqual(["kept"]);
+  it("delivers every complete block in one chunk, in order", () => {
+    const framer = new SSEFramer();
+    expect(framer.push("data:a\n\ndata:b\n\ndata:c\n\n")).toEqual([{ data: "a" }, { data: "b" }, { data: "c" }]);
   });
 
-  it("tolerates CRLF line endings", () => {
-    // trim() removes the \r, so the payload must come through clean.
-    const { payloads, rest } = splitSSEData("data:crlf\r\n");
-    expect(payloads).toEqual(["crlf"]);
-    expect(rest).toBe("");
+  it("reassembles a block whose data value was cut across chunks", () => {
+    const framer = new SSEFramer();
+    expect(framer.push("data:hel")).toEqual([]);
+    expect(framer.push("lo\n\n")).toEqual([{ data: "hello" }]);
   });
 
-  it("yields an empty payload for a bare data field", () => {
-    const { payloads } = splitSSEData("data:\n");
-    expect(payloads).toEqual([""]);
+  it("reassembles a block whose field name was cut across chunks", () => {
+    const framer = new SSEFramer();
+    expect(framer.push("dat")).toEqual([]);
+    expect(framer.push("a:split\n\n")).toEqual([{ data: "split" }]);
   });
 
-  it("ignores blank lines", () => {
-    const { payloads, rest } = splitSSEData("\n\n\n");
-    expect(payloads).toEqual([]);
-    expect(rest).toBe("");
+  it("keeps event and id on the frame", () => {
+    const framer = new SSEFramer();
+    // `event` is load bearing downstream: a non-200 envelope on `event:finish`
+    // is not an error, so dropping the field would turn clean finishes into
+    // failures.
+    expect(framer.push("event:finish\nid:42\ndata:{}\n\n")).toEqual([{ data: "{}", event: "finish", id: "42" }]);
   });
 
-  it("returns the whole buffer as rest when there is no line break yet", () => {
-    const { payloads, rest } = splitSSEData("data:partial");
-    expect(payloads).toEqual([]);
-    expect(rest).toBe("data:partial");
+  it("ignores retry and unknown fields without ending the block", () => {
+    const framer = new SSEFramer();
+    expect(framer.push("retry:3000\nfoo:bar\ndata:kept\n\n")).toEqual([{ data: "kept" }]);
   });
 
-  it("strips whitespace around the payload", () => {
-    const { payloads } = splitSSEData("data:   spaced   \n");
-    expect(payloads).toEqual(["spaced"]);
+  it("ignores comment lines that start with a colon", () => {
+    const framer = new SSEFramer();
+    expect(framer.push(":heartbeat comment\ndata:kept\n\n")).toEqual([{ data: "kept" }]);
   });
 
-  it("reassembles a payload that was cut across chunks", () => {
-    const first = splitSSEData("data:hel");
-    expect(first.payloads).toEqual([]);
-    expect(first.rest).toBe("data:hel");
-    const second = splitSSEData(`${first.rest}lo\n`);
-    expect(second.payloads).toEqual(["hello"]);
-    expect(second.rest).toBe("");
+  it("ignores lines that contain no colon", () => {
+    const framer = new SSEFramer();
+    // A colonless line is skipped outright rather than read as a field with an
+    // empty value, so it must not become `data` and must not end the block.
+    expect(framer.push("garbage\ndata:kept\n\n")).toEqual([{ data: "kept" }]);
   });
 
-  it("keeps leading whitespace of an incomplete tail verbatim in rest", () => {
-    // rest is used to continue the next chunk, so its bytes must be preserved.
-    const { payloads, rest } = splitSSEData("data:one\n   data:two");
-    expect(payloads).toEqual(["one"]);
-    expect(rest).toBe("   data:two");
+  it("strips only one leading space from a field value", () => {
+    const framer = new SSEFramer();
+    expect(framer.push("data:  x\n\n")).toEqual([{ data: " x" }]);
   });
-});
 
-// ---------------------------------------------------------------------------
-// Differential oracle. The body below is copied byte for byte out of the
-// pre-optimisation implementation:
-//
-//   git show bac0cb4:src/sse.ts | sed -n '25,35p'
-//
-// Only the function name differs, so it can sit beside the import. The
-// duplication is deliberate: the rewrite is a pure performance change and this
-// is what proves it, so a failing case means the new scan is wrong - never
-// "fix" it by editing this function.
-// ---------------------------------------------------------------------------
-function legacySplitSSEData(buffer: string): { payloads: string[]; rest: string } {
-  const payloads: string[] = [];
-  let rest = buffer;
-  while (true) {
-    const lineEnd = rest.indexOf("\n");
-    if (lineEnd === -1) break;
-    const line = rest.substring(0, lineEnd).trim();
-    rest = rest.substring(lineEnd + 1);
-    if (!line.startsWith("data:")) continue;
-    payloads.push(line.substring(5).trim());
-  }
-  return { payloads, rest };
-}
+  it("does not trim the field value", () => {
+    const framer = new SSEFramer();
+    // JSON.parse tolerates the trailing space; a trim here would be silent
+    // rewriting of the payload, which the byte accounting also has to match.
+    expect(framer.push('data: {"a":1} \n\n')).toEqual([{ data: '{"a":1} ' }]);
+  });
 
-// --------------------------- end of oracle ---------------------------------
+  it("frames a CRLF stream by stripping the trailing carriage return", () => {
+    const framer = new SSEFramer();
+    expect(framer.push("event:message\r\ndata:crlf\r\n\r\n")).toEqual([{ data: "crlf", event: "message" }]);
+  });
 
-const manyPayloads = Array.from({ length: 64 }, (_, i) => `data:${i}\n`).join("");
-const largeBuffer = `${Array.from({ length: 2000 }, (_, i) => (i % 3 === 0 ? `event:e${i}\n` : `data:${i}\n`)).join(
-  "",
-)}data:tail-with-no-newline`;
+  it("strips only one trailing carriage return", () => {
+    const framer = new SSEFramer();
+    expect(framer.push("data:cr\r\r\n\n")).toEqual([{ data: "cr\r" }]);
+  });
 
-describe("splitSSEData equals the pre-optimisation implementation", () => {
-  const cases: Array<{ name: string; buffer: string }> = [
-    { name: "an empty buffer", buffer: "" },
-    { name: "a lone newline", buffer: "\n" },
-    { name: "a lone CRLF", buffer: "\r\n" },
-    { name: "consecutive blank lines", buffer: "\n\n\n\n" },
-    { name: "a newline before anything else", buffer: "\ndata:tail\n" },
-    { name: "one complete data line", buffer: "data:a\n" },
-    { name: "an incomplete line with no newline at all", buffer: "data:partial" },
-    { name: "a bare field name with no newline", buffer: "data:" },
-    { name: "two data lines", buffer: "data:a\ndata:b\n" },
-    { name: "blank-line separated events", buffer: "data:a\n\ndata:b\n\n" },
-    { name: "many payloads in one chunk", buffer: manyPayloads },
-    { name: "non-data fields and comments", buffer: "event:message\n:heartbeat\ndata:kept\n" },
-    { name: "a field name with no colon", buffer: "data\ndata:ok\n" },
-    { name: "an uppercase field name", buffer: "DATA:upper\ndata:lower\n" },
-    { name: "text before the field name", buffer: "x data:not-a-field\n" },
-    { name: "CRLF line endings", buffer: "data:a\r\ndata:b\r\n" },
-    { name: "an empty payload", buffer: "data:\n" },
-    { name: "an empty payload with CR", buffer: "data:\r\n" },
-    { name: "a whitespace-only payload", buffer: "data:   \n" },
-    { name: "no space after the colon", buffer: "data:tight\n" },
-    { name: "redundant whitespace around and inside the payload", buffer: "data:   a  b   \n" },
-    { name: "tabs around the payload", buffer: "data:\ta\t\n" },
-    { name: "whitespace before the field name", buffer: "   data:indented\n" },
-    { name: "a complete line followed by an incomplete tail", buffer: "data:   spaced   \ndata:tail" },
-    { name: "an indented incomplete tail", buffer: "data:one\n   data:two" },
-    { name: "a trailing bare field name", buffer: "data:x\ndata:" },
-    { name: "a payload containing colons and JSON", buffer: 'data:{"a":"b:c"}\n' },
-    { name: "a payload that repeats the field name", buffer: "data:data:inner\n" },
-    { name: "a payload with an embedded CR", buffer: "data:a\rb\n" },
-    { name: "a payload with an embedded NUL", buffer: "data:a\0b\n" },
-    { name: "a multibyte payload", buffer: "data:\u4e2d\u6587 \ud83d\ude42\n" },
-    // The split is greedy and knows no terminator, so everything after [DONE]
-    // still comes back; stopping there is the caller's job.
-    { name: "payloads after the wrapped terminator", buffer: 'data:{"body":"[DONE]"}\ndata:after\n' },
-    { name: "payloads after a bare terminator", buffer: "data: [DONE]\n\ndata:after\n" },
-    { name: "a large buffer", buffer: largeBuffer },
-  ];
+  it("produces no frame for heartbeat blank lines", () => {
+    const framer = new SSEFramer();
+    expect(framer.push("\n\n\n")).toEqual([]);
+  });
 
-  for (const { name, buffer } of cases) {
-    it(`matches for ${name}`, () => {
-      expect(splitSSEData(buffer)).toEqual(legacySplitSSEData(buffer));
-    });
-  }
+  it("delivers a frame for a bare data field", () => {
+    const framer = new SSEFramer();
+    // A `data:` line with no value still makes the block deliverable, unlike a
+    // block that never saw a field at all.
+    expect(framer.push("data:\n\n")).toEqual([{ data: "" }]);
+  });
 
-  // The differential cases above only kill a stalled cursor by hanging, which is
-  // indistinguishable from an unrelated CI timeout. This pins the advance with a
-  // real assertion: every complete line must be consumed, so whatever is handed
-  // back as rest cannot still contain a newline. Bounded so a stall fails fast.
-  it("consumes every complete line, leaving no newline in rest", () => {
-    for (const { name, buffer } of cases) {
-      expect(splitSSEData(buffer).rest, name).not.toContain("\n");
+  it("delivers a frame for a block that carries only an id", () => {
+    const framer = new SSEFramer();
+    expect(framer.push("id:7\n\n")).toEqual([{ data: "", id: "7" }]);
+  });
+
+  it("clears event and id after delivering a frame", () => {
+    const framer = new SSEFramer();
+    expect(framer.push("event:message\nid:1\ndata:first\n\n")).toEqual([{ data: "first", event: "message", id: "1" }]);
+    expect(framer.push("data:second\n\n")).toEqual([{ data: "second" }]);
+  });
+
+  it("throws when a single line exceeds the line byte ceiling", () => {
+    const framer = new SSEFramer();
+    const half = "d".repeat(MAX_SSE_LINE_BYTES / 2 + 1);
+    // Split in two so the ceiling is proven to be charged against the line as
+    // it accumulates, not against one chunk at a time.
+    expect(framer.push(half)).toEqual([]);
+    expect(() => framer.push(half)).toThrow(SSEProtocolLimitError);
+  });
+
+  it("reports the ceiling and the actual size on a line overflow", () => {
+    const framer = new SSEFramer();
+    const overshoot = MAX_SSE_LINE_BYTES + 1;
+    try {
+      framer.push("d".repeat(overshoot));
+      expect.unreachable("expected a protocol limit error");
+    } catch (e) {
+      expect(e).toBeInstanceOf(SSEProtocolLimitError);
+      const error = e as SSEProtocolLimitError;
+      expect(error.limitKind).toBe("line");
+      expect(error.limitBytes).toBe(MAX_SSE_LINE_BYTES);
+      expect(error.actualBytes).toBe(overshoot);
+      expect(error.message).toContain(String(MAX_SSE_LINE_BYTES));
+      expect(error.message).toContain(String(overshoot));
     }
-  }, 1000);
-});
+  });
 
-describe("splitSSEData threads rest across chunks like the pre-optimisation implementation", () => {
-  const sequences: Array<{ name: string; chunks: string[] }> = [
-    { name: "a payload cut mid-value", chunks: ["data:hel", "lo\n"] },
-    { name: "a field name cut in half", chunks: ["dat", "a:split\n"] },
-    { name: "a CR stranded at the chunk boundary", chunks: ["data:a\r", "\ndata:b\r\n"] },
-    { name: "a newline arriving on its own", chunks: ["data:a", "\n"] },
-    { name: "empty chunks between payloads", chunks: ["", "data:x\n", "", "\n"] },
-    { name: "several payloads then a partial", chunks: ["data:a\ndata:b\ndata:", "c\ndata:d"] },
-    { name: "an indented tail carried over", chunks: ["data:one\n   data:t", "wo\n"] },
-    { name: "JSON split across three chunks", chunks: ['data:{"a"', ':1}\n\ndata:{"b"', ":2}\n\n"] },
-    {
-      name: "a line that grows over 50 chunks",
-      chunks: ["data:", ...Array.from({ length: 50 }, () => "x".repeat(100)), "\n"],
-    },
-  ];
-
-  for (const { name, chunks } of sequences) {
-    it(`matches for ${name}`, () => {
-      // Each implementation carries its own rest forward, so a wrong tail does
-      // not get papered over by the next chunk - it diverges and stays diverged.
-      let rest = "";
-      let legacyRest = "";
-      for (const [index, chunk] of chunks.entries()) {
-        const actual = splitSSEData(rest + chunk);
-        const expected = legacySplitSSEData(legacyRest + chunk);
-        expect(actual, `chunk ${index}`).toEqual(expected);
-        rest = actual.rest;
-        legacyRest = expected.rest;
-      }
-    });
-  }
+  it("measures the line ceiling in UTF-8 bytes, not code units", () => {
+    const framer = new SSEFramer();
+    // Half as many code units as the ceiling, but two bytes each: counting
+    // characters instead of bytes would let this line through.
+    const line = "é".repeat(MAX_SSE_LINE_BYTES / 2 + 1);
+    expect(line.length).toBeLessThan(MAX_SSE_LINE_BYTES);
+    expect(() => framer.push(line)).toThrow(SSEProtocolLimitError);
+  });
 });

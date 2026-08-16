@@ -11,7 +11,7 @@ import { getQoderMode, isQoderCNMode } from "./cosy.js";
 import { QoderEventTranslator } from "./events.js";
 import { resolveQoderSigningIdentity } from "./oauth.js";
 import { buildChatRequest } from "./request.js";
-import { splitSSEData } from "./sse.js";
+import { SSEFramer } from "./sse.js";
 import { type OpenedQoderStream, openQoderStream } from "./transport.js";
 
 export function streamQoder(
@@ -76,7 +76,7 @@ export function streamQoder(
 
       stream.push({ type: "start", partial: output });
 
-      let buffer = "";
+      const framer = new SSEFramer();
       // Set when the terminator arrives, so the outer read loop stops instead of
       // waiting for the server to close the socket.
       let finished = false;
@@ -98,15 +98,12 @@ export function streamQoder(
           armIdleWatchdog();
         }
 
-        buffer += decoder.decode(chunk, { stream: true });
-        const { payloads, rest } = splitSSEData(buffer);
-        buffer = rest;
+        const frames = framer.push(decoder.decode(chunk, { stream: true }));
 
-        // splitSSEData is greedy and knows no terminator, so stop consuming at
-        // the first "done": anything the server sent after it is discarded,
-        // which is what the inlined loop's break did.
-        for (const payload of payloads) {
-          if (translator.push(payload) === "done") {
+        // The framer knows no terminator, so stop consuming at the first
+        // "done": anything the server sent after it is discarded.
+        for (const frame of frames) {
+          if (translator.push(frame) === "done") {
             finished = true;
             break;
           }
