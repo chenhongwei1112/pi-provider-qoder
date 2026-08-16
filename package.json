@@ -28,7 +28,8 @@
     "test:watch": "vitest",
     "prepare": "npm run build",
     "prepublishOnly": "npm run check && npm run build",
-    "audit:extract": "node scripts/extract-qodercli.mjs"
+    "audit:extract": "node scripts/extract-qodercli.mjs",
+    "audit:oracle": "vitest run scripts/__tests__/cosy-oracle.test.mjs"
   },
   "omp": {
     "extensions": [
