@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildAuthHeaders, computeCosySignature, computeSigPath, getQoderChatURL } from "../cosy.js";
-import { qoderEncodeBody } from "../qoder-encoding.js";
+import { parseQoderJsonBody, qoderDecodeBody, qoderEncodeBody } from "../qoder-encoding.js";
 
 interface OracleVectors {
   qodercliVersion: string;
@@ -57,6 +57,28 @@ describe("body obfuscation against frozen official vectors", () => {
     vectors.bodyEncoding.map((c, i) => [i, c] as const),
   )("matches the wasm output byte for byte (case %i)", (_i, c) => {
     expect(qoderEncodeBody(c.input)).toBe(c.encoded);
+  });
+});
+
+/**
+ * 解码方向。冻结向量里的 `encoded` 是官方 WASM 的真实输出，所以这一节等价于
+ * 「插件的解码器 == 官方 decrypt_server_response」，而且不需要本地装 qodercli。
+ * 官方对所有非流式 JSON 响应都过那一道，见 docs/qoder-alignment-audit.md 差异第 40 行。
+ */
+describe("body de-obfuscation against frozen official vectors", () => {
+  it.each(vectors.bodyEncoding.map((c, i) => [i, c] as const))("recovers the plaintext (case %i)", (_i, c) => {
+    expect(qoderDecodeBody(c.encoded)).toBe(c.input);
+  });
+
+  it("reads an encoded response body", () => {
+    const c = vectors.bodyEncoding[0];
+    expect(parseQoderJsonBody(c.encoded)).toEqual(JSON.parse(c.input));
+  });
+
+  it("passes a plaintext response body through untouched", () => {
+    // 官方的 WASM 对明文恒等，这是它敢无条件调用的原因；插件这条路径必须同样无害。
+    const c = vectors.bodyEncoding[0];
+    expect(parseQoderJsonBody(c.input)).toEqual(JSON.parse(c.input));
   });
 });
 

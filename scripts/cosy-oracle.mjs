@@ -49,6 +49,12 @@ export async function createOracle({ auditDir, machineId, uid, encryptUserInfo, 
       return JSON.parse(glue.generate_runtime_auth_fields(JSON.stringify(userInfo)));
     },
 
+    // 官方对所有非流式 JSON 响应体都过这一道（台账差异第 40 行）。它对明文恒等，
+    // 所以官方敢无条件调；插件侧的对应物是 `qoderDecodeBody`。
+    decryptServerResponse(text) {
+      return String(glue.decryptServerResponse(text));
+    },
+
     inferRequest({ endpoint, body, modelKey, modelSource }) {
       const result = glue.withWasmContextRetry((ctx) => ctx.prepareInferRequest(endpoint, body, modelKey, modelSource));
       try {

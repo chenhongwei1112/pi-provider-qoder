@@ -1,5 +1,6 @@
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
 import { getQoderManageUrl, getQoderMode, getQoderUsageURL, isQoderCNMode, ProviderUserAgent } from "./cosy.js";
+import { parseQoderJsonBody } from "./qoder-encoding.js";
 
 interface QoderQuota {
   total: number;
@@ -47,7 +48,8 @@ async function fetchQoderUsageForMode(credentials: OAuthCredentials, mode: strin
     throw new Error(`Failed to fetch Qoder usage: ${response.status} ${response.statusText}`);
   }
 
-  const raw = (await response.json()) as QoderUsageInfo;
+  // 与目录同理：官方对 /api/v2/quota/usage 也过一遍解密（台账差异第 40 行）。
+  const raw = parseQoderJsonBody<QoderUsageInfo>(await response.text());
   const usageBuckets = [];
 
   if (raw.userQuota) {

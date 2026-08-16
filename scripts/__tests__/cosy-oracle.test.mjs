@@ -122,4 +122,27 @@ describe.skipIf(!auditDir)("cosy oracle against the official wasm", () => {
     expect(second.encrypt_user_info).not.toBe(first.encrypt_user_info);
     expect(second.key).not.toBe(first.key);
   });
+
+  // 台账差异第 40 行的两个前提，直接钉在官方 WASM 上。插件侧的对应物是
+  // `qoderDecodeBody`，它与这里的输出的一致性由冻结向量那套用例覆盖。
+  it("decrypts a response body back to the plaintext it encoded", async () => {
+    const oracle = await createOracle({ auditDir, ...identity });
+    const plain = JSON.stringify({ hello: "world", n: 42 });
+    const encoded = oracle.inferRequest({
+      endpoint: "https://api3.qoder.sh",
+      body: plain,
+      modelKey: "qmodel",
+      modelSource: "system",
+    }).body;
+    expect(encoded).not.toBe(plain);
+    expect(oracle.decryptServerResponse(encoded)).toBe(plain);
+  });
+
+  it("leaves an already-plaintext response body untouched", async () => {
+    const oracle = await createOracle({ auditDir, ...identity });
+    // 官方之所以能对每个非流式响应无条件调用它，就是因为这一条。
+    for (const plain of ['{"a":1}', "{}", "", "not json at all"]) {
+      expect(oracle.decryptServerResponse(plain)).toBe(plain);
+    }
+  });
 });

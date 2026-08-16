@@ -3,6 +3,21 @@ import type * as NodeOs from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getCachedModels, updateQoderModelsCache } from "../models.js";
+import { qoderEncodeBody } from "../qoder-encoding.js";
+
+/**
+ * `models.ts` 读 `response.text()` 再走 `parseQoderJsonBody`，因为官方对目录响应
+ * 过一遍 decrypt_server_response（台账差异第 40 行），而 `json()` 遇到编码过的
+ * 正文会抛且把 body 消费掉。这个替身按真实 `Response` 提供 `text()`。
+ */
+function jsonResponse(body: unknown) {
+  return { ok: true, text: () => Promise.resolve(JSON.stringify(body)) };
+}
+
+/** 同上，但正文是 Qoder 的混淆编码形式，用来验证解码路径真的接上了。 */
+function encodedResponse(body: unknown) {
+  return { ok: true, text: () => Promise.resolve(qoderEncodeBody(JSON.stringify(body))) };
+}
 
 // `src/models.ts` resolves the cache path from `homedir()`, so the home
 // directory is redirected before any import is evaluated: `vi.hoisted` runs
@@ -51,18 +66,16 @@ describe("Qoder model cache", () => {
   it("keeps only enabled service models without adding auto as a fallback", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            chat: [
-              { key: "auto", enable: false, display_name: "Auto" },
-              { key: "ultimate", enable: true, display_name: "Ultimate", is_reasoning: true },
-              { key: "lite", enable: true, display_name: "Lite" },
-              { key: "performance", enable: false, display_name: "Performance" },
-            ],
-          }),
-      }),
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          chat: [
+            { key: "auto", enable: false, display_name: "Auto" },
+            { key: "ultimate", enable: true, display_name: "Ultimate", is_reasoning: true },
+            { key: "lite", enable: true, display_name: "Lite" },
+            { key: "performance", enable: false, display_name: "Performance" },
+          ],
+        }),
+      ),
     );
 
     await updateQoderModelsCache("access-token", "user-id", "Test User", "test@example.com", "global");
@@ -75,10 +88,7 @@ describe("Qoder model cache", () => {
   it("keeps the Cantus model returned by the current catalog", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({ chat: [{ key: "cmodel", enable: true, display_name: "Cantus" }] }),
-      }),
+      vi.fn().mockResolvedValue(jsonResponse({ chat: [{ key: "cmodel", enable: true, display_name: "Cantus" }] })),
     );
 
     await updateQoderModelsCache("access-token", "user-id", "Test User", "test@example.com", "global");
@@ -104,16 +114,14 @@ describe("Qoder model cache", () => {
   it("keeps entries without an explicit enable flag (dogfood/crit models)", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            chat: [
-              { key: "qwen3.8-v120-dogfood-crit", display_name: "Peach-07-17-DogFooding" },
-              { key: "disabled-entry", enable: false, display_name: "Disabled" },
-            ],
-          }),
-      }),
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          chat: [
+            { key: "qwen3.8-v120-dogfood-crit", display_name: "Peach-07-17-DogFooding" },
+            { key: "disabled-entry", enable: false, display_name: "Disabled" },
+          ],
+        }),
+      ),
     );
 
     await updateQoderModelsCache("access-token", "user-id", "Test User", "test@example.com", "global");
@@ -125,22 +133,38 @@ describe("Qoder model cache", () => {
   it("prefers the assistant scene over chat (qodercli default scene)", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            chat: [{ key: "dfmodel", enable: true, display_name: "DeepSeek-V4-Flash" }],
-            assistant: [
-              { key: "dfmodel", enable: true, display_name: "DeepSeek-V4-Flash" },
-              { key: "qwen3.8-v120-dogfood-crit", display_name: "Peach-07-17-DogFooding" },
-            ],
-          }),
-      }),
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          chat: [{ key: "dfmodel", enable: true, display_name: "DeepSeek-V4-Flash" }],
+          assistant: [
+            { key: "dfmodel", enable: true, display_name: "DeepSeek-V4-Flash" },
+            { key: "qwen3.8-v120-dogfood-crit", display_name: "Peach-07-17-DogFooding" },
+          ],
+        }),
+      ),
     );
 
     await updateQoderModelsCache("access-token", "user-id", "Test User", "test@example.com", "global");
 
     const cache = JSON.parse(readFileSync(CACHE_PATH, "utf8"));
     expect(cache.models.map((model: { id: string }) => model.id)).toEqual(["dfmodel", "qwen3.8-v120-dogfood-crit"]);
+  });
+
+  // 台账差异第 40 行：官方对目录响应无条件过一遍解密。这条用编码后的正文喂进去，
+  // 证明解码真的接在了生产路径上，而不只是 qoder-encoding.ts 里的一个纯函数。
+  it("reads a catalog response that arrived in the obfuscated form", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        encodedResponse({
+          assistant: [{ key: "emodel", enable: true, display_name: "Encoded" }],
+        }),
+      ),
+    );
+
+    await updateQoderModelsCache("access-token", "user-id", "Test User", "test@example.com", "global");
+
+    const cache = JSON.parse(readFileSync(CACHE_PATH, "utf8"));
+    expect(cache.models.map((model: { id: string }) => model.id)).toEqual(["emodel"]);
   });
 });

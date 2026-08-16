@@ -10,6 +10,7 @@ import {
 } from "./cosy.js";
 import { type QoderModelDef, staticCnModels, staticModels, ZERO_COST } from "./models-static.js";
 import { agentPath } from "./paths.js";
+import { parseQoderJsonBody } from "./qoder-encoding.js";
 
 /** Shape of a single entry returned by the Qoder /model/list endpoint. */
 interface QoderModelEntry {
@@ -163,11 +164,13 @@ export async function updateQoderModelsCache(
       return;
     }
 
-    const resData = (await response.json()) as {
+    // 官方对目录响应过一遍 decrypt_server_response（台账差异第 40 行）。它对明文恒等，
+    // 所以今天等于无操作；服务端哪天改成编码返回时，这里才是优雅处理与满屏乱码的区别。
+    const resData = parseQoderJsonBody<{
       chat?: QoderModelEntry[];
       assistant?: QoderModelEntry[];
       [scene: string]: unknown;
-    };
+    }>(await response.text());
     // qodercli 的默认场景是 assistant（SM().scene ?? "assistant"），dogfood
     // 模型只在该场景返回。chat 场景是旧端点的缩减目录，保留作回退。
     const chatModels = resData.assistant || resData.chat || [];
