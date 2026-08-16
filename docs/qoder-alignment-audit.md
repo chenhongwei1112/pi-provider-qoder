@@ -345,9 +345,9 @@ messages, tools, parameters, chat_context, model_config, business`
 
 **唯一一条建议插队到最前面的是第 40 行（响应解密）**：它对明文恒等，今天零行为变化，改动面只有 `models.ts:166` 与 `usage.ts:50` 两处，却把"服务端改成编码返回"这个随时可能发生的事从"满屏乱码"变成"无事发生"。
 
-### 本轮遗留的两处待改
+### 本轮遗留的待改项
 
 都不在本文件范围内，记在这里免得丢：
 
-- `scripts/cosy-oracle.mjs:31` 的注释断言 `encrypt_user_info` 与 `key` 来自登录响应，已被差异第 14 行的实测推翻。
+- ~~`scripts/cosy-oracle.mjs:31` 的注释断言 `encrypt_user_info` 与 `key` 来自登录响应~~ —— 已随本轮修正（`428e4f0`），注释现在写明官方也是本地生成并附上四条登录路径的行号。
 - `scripts/carve-glue.mjs` 的导出清单没带出 wasm-bindgen 模块命名空间，所以 `generate_runtime_auth_fields` 这类导出目前只能靠临时改一份 glue 副本来调。要把差异第 14 行的实测固化成预言机用例，得先加这一项。
