@@ -141,9 +141,6 @@ describe("Qoder model cache", () => {
     await updateQoderModelsCache("access-token", "user-id", "Test User", "test@example.com", "global");
 
     const cache = JSON.parse(readFileSync(CACHE_PATH, "utf8"));
-    expect(cache.models.map((model: { id: string }) => model.id)).toEqual([
-      "dfmodel",
-      "qwen3.8-v120-dogfood-crit",
-    ]);
+    expect(cache.models.map((model: { id: string }) => model.id)).toEqual(["dfmodel", "qwen3.8-v120-dogfood-crit"]);
   });
 });
