@@ -191,7 +191,7 @@ messages, tools, parameters, chat_context, model_config, business`
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 47 | 5 | openapi 辅助请求的请求头 | `openApiJsonRequest` 只发 `Accept: application/json` 与 `User-Agent: qoder/<version>`，有 token 才加 `Authorization`，有 body 才加 `Content-Type`（`JS:114954-114957`）。**一个 COSY 头都不发** | PAT 交换与 userinfo 都额外发 `Cosy-Version: 1.0.1` 与 `Cosy-ClientType: 5`（`pat.ts:60-66`、`pat.ts:109-115`）。`1.0.1` 是仓库里第三个版本串——另两个是 `cosy.ts:16` 的 `1.1.3` 与实际的 `1.1.23`（见差异第 2 行） | `JS:114954-114957` vs `pat.ts:60-66`、`pat.ts:109-115` | 中 | 必须对齐（删掉这两个头；顺带把 `1.0.1` 这个字面量一起清掉） |
 | 48 | 5 | 辅助请求的 `User-Agent` | 每个 openapi 与刷新请求都发 `qoder/<version>`（`JS:114954`、`JS:115104`、`JS:115138`） | 全部发 `omp-provider-qoder`（`cosy.ts:27`，用在 `pat.ts:63`、`pat.ts:112`、`oauth.ts:234`、`login.ts:140`、`login.ts:179`、`usage.ts:42`） | `JS:114954`、`JS:115104`、`JS:115138` vs `cosy.ts:21-27` | 低 | 无需对齐（**有意**：`cosy.ts:21-27` 明确写了这是自报身份、不冒充官方客户端，签名头才承载真实客户端标识。这是 fork 的取舍，不是 bug） |
-| 49 | 5 | userinfo 响应的读取 | 取 `id`/`user_id`/`uid` 三个别名之一当 uid，缺则**硬失败**；`name`/`username`/`user_name`、`email`、`avatar_url`、`organization_id`（另回退到 `organization.id`）、`organization_name`、`organization_tags`（含 `organizationTags` 驼峰）、`is_data_policy_modifiable` 全都读，并校验 uid 与已存凭据一致（不一致抛 403）（`JS:114995-115002`）；组织 tags 还会再拉一次补全（`JS:114942-114948`） | 只读 `id`、`email`、`name`/`username`（`pat.ts:118-126`），失败时静默吞掉（`pat.ts:128-130`）。两个后果：① 服务端若返回 `uid` 而非 `id`，`userID` 为空串，之后 `buildAuthHeaders` 抛 `cosy: user id is empty`（`cosy.ts:292-293`）；② `organization_id` / `organization_tags` 拿不到——而它们正是官方喂给 `generate_runtime_auth_fields` 的输入（`JS:114929`，见差异第 14 行）与组织头的来源（见差异第 8 行） | `JS:114942-114948`、`JS:114995-115002` vs `pat.ts:103-131` | 中 | 必须对齐 |
+| 49 | 5 | userinfo 响应的读取 | 取 `id`/`user_id`/`uid` 三个别名之一当 uid，缺则**硬失败**；`name`/`username`/`user_name`、`email`、`avatar_url`、`organization_id`（另回退到 `organization.id`）、`organization_name`、`organization_tags`（含 `organizationTags` 驼峰）、`is_data_policy_modifiable` 全都读，并校验 uid 与已存凭据一致（不一致抛 403）（`JS:114995-115002`）；组织 tags 还会再拉一次补全（`JS:114942-114948`） | **后果 ① 已修**：`pat.ts:117-134` 现在按官方的三个别名读 uid（`id`/`user_id`/`uid`）与三个别名读 name，`src/__tests__/pat.test.ts` 的 `"reads the uid from %s"` / `"reads the display name from %s"` 逐别名钉住，所以服务端换字段名不会再让 `userID` 变空串。**后果 ② 未修**（`organization_id` / `organization_tags` 仍不读）：它只有在差异第 14 行落地后才有消费者，先补进来就是死代码，故与第 14 行一并挂起。原文：失败时静默吞掉（`pat.ts:135-137`）；② `organization_id` / `organization_tags` 拿不到——而它们正是官方喂给 `generate_runtime_auth_fields` 的输入（`JS:114929`，见差异第 14 行）与组织头的来源（见差异第 8 行） | `JS:114942-114948`、`JS:114995-115002` vs `pat.ts:103-131` | 中 | 必须对齐 |
 | 50 | 5 | `info` / `Cosy-Key` 的生命周期 | **每凭据一次**：`regenerateRuntimeFields()` 只在登录（`JS:114630`、`JS:114651`）与 token 刷新（`JS:115126`、`JS:115145`）时调，算出的一对灌进 QoderContext（`JS:114891-114892`、`JS:115147`），此后每个请求原样回放 | ~~**每请求一次**：现摇随机 AES key、每个请求的 `Cosy-Key` 都不一样~~ **已修**：改成按凭据缓存（`cosy.ts:294-334` 的 `runtimeAuthFields`），缓存键含 authToken，所以登录或刷新换 token 时自然重算，等价于官方的时机。`src/__tests__/cosy-signature.test.ts` 的 `"replays the same Cosy-Key across requests made with one credential"` / `"recomputes the pair when the token changes, which is what login and refresh do"` / `"still varies the per-request fields"` 钉住三面 | `JS:114891-114892`、`JS:114927-114931`、`JS:115145-115147` vs `cosy.ts:287-356`；`预言机:"replays the credential-supplied user info and key verbatim"`；`预言机:"produces a different pair on every call for the same input"`：`generate_runtime_auth_fields` 同输入连调两次密文不同，所以"每请求重算"在服务端是能看出来的 | 中 | 必须对齐 |
 | 51 | 5 | machine id 的推导与落盘 | 优先由硬件推导：`sha256("<salt>:linux:<硬件 uuid 小写>")` 再格式化成 UUID 形状，取不到或超时才随机（`JS:76181-76209`）；落盘走原子发布——`open(tmp,"wx",0o600)` + `link`，`link` 撞 `EEXIST` 就采纳已有值，失败再退 `rename`（`JS:76249-76282`），路径 `~/.qoder/.auth/machine_id`（`JS:76506`）；读取带重试与登录期修复（`JS:76222-76224`、`JS:76480-76495`） | 先读官方那个文件（`cosy.ts:269` 第一个路径），读不到就读自己的 `qoder-machine-id`，两个都没有就 `crypto.randomUUID()` 并用默认权限的 `writeFileSync` 写到 omp 目录（`cosy.ts:278-283`）。**从不由硬件推导，也从不写官方那个路径。**后果：没装 Qoder IDE 的机器上拿到的是随机值，之后再装 qodercli 会推导出**另一个** id，同一台机器出现两个设备指纹 | `JS:76181-76209`、`JS:76249-76282`、`JS:76506` vs `cosy.ts:265-285` | 中 | 必须对齐 |
 | 52 | 5 | device token 的刷新端点 | `POST <openapi>/api/v1/deviceToken/refresh`，体 `{refresh_token}`，头 `Content-Type` + `Accept` + `User-Agent: qoder/<version>`（`JS:115104`） | `POST <center>/algo/api/v3/user/refresh_token`，体 `{refreshToken}`（驼峰）（`cosy.ts:119-121`、`oauth.ts:226-237`）。这条路径在官方 1.1.23 的 bundle 里**命中 0 次**；失败后静默把有效期延一小时（`oauth.ts:278-283`），所以刷新一直不成功也不会有人发现 | `JS:115104` vs `cosy.ts:119-121`、`oauth.ts:226-283`；`cosy.test.ts:getQoderRefreshURL:"constructs correct global URL"` / `"constructs correct CN URL"` 钉住插件当前这条 URL（**它们钉的是现状，不是正确值**） | 中 | 必须对齐 |
@@ -344,6 +344,34 @@ messages, tools, parameters, chat_context, model_config, business`
 3. **低风险且必须对齐 7 条：11、12、22、26、29、37、39。**第 39 行有次序依赖（第 24 行之后），其余随手可做。
 
 **唯一一条建议插队到最前面的是第 40 行（响应解密）**：它对明文恒等，今天零行为变化，改动面只有 `models.ts:166` 与 `usage.ts:50` 两处，却把"服务端改成编码返回"这个随时可能发生的事从"满屏乱码"变成"无事发生"。
+
+### 第二阶段第一批：已改 8 条，待真实请求验证
+
+以下 8 条已经落地，`npm test` 349 条全绿、`npm run audit:oracle` 10 条全绿、`npm run lint` 干净：
+
+| 行 | 改了什么 | 离线证据 |
+| --- | --- | --- |
+| 40 | 目录与配额响应过一遍解码（`qoderDecodeBody` / `parseQoderJsonBody`） | 解码器对冻结的官方 WASM 输出逐例还原；`models-cache.test.ts` 用编码正文喂生产路径 |
+| 1 | `model/list` 恢复 `/algo` 与 `Encode=1` | `cosy.test.ts` 两条红灯转绿；新增按 `V.catalogRequest.url` 断言的用例 |
+| 2 | `Cosy-Version` 1.1.3 → 1.1.23（请求头与被签名载荷两处） | 锁定用例对 `V.inferRequest.headers` 与 `V.signature.payload` 双向断言 |
+| 3 | 四个头名改成官方拼法 | 锁定用例的大小写数组现在是空数组 |
+| 4 | `Cosy-Machineos` → `Cosy-MachineOS` | 同上 |
+| 5 | 补 `Cosy-Business-Product` / `-Type` / `Cosy-Scene` | 锁定用例的缺失数组只剩 `Connection` |
+| 7 | 删 `Cosy-Bodyhash` / `-Bodylength` / `Cosy-Sigpath` | 锁定用例的多发数组少了这三个 |
+| 50 | `info` / `Cosy-Key` 改成每凭据算一次 | 三条用例钉住"同凭据稳定 / 换 token 重算 / requestId 仍每请求变" |
+
+第 49 行只改了一半（uid 与 name 的别名），组织字段那半与第 14 行一并挂起。
+
+**第 14 行（改 `info` 明文）本轮有意不做。**它是这一批里唯一无法离线举证的：预言机只能证明加密形状，
+证明不了服务端解密后读哪些字段。官方明文里没有 `security_oauth_token`，但官方走的是另一条登录路径，
+不能据此推断插件删掉它也安全 —— 若服务端对 PAT/jobToken 会话依赖这个字段，改完每个请求都会 401。
+另有两处附带推断：`data_policy_agreed` 来自插件从不调用的 data-policy 接口，只能给默认值。
+决定：先用真实请求验证上面这 8 条，确认无回归后再单独动第 14 行，一次只变一个变量。
+
+验证方法：跑一次正常对话（覆盖 `agent_chat_generation`）、一次 `omp models`（覆盖 `model/list`
+与新的解码路径）、一次用量查询（覆盖 `quota/usage`）。要看的是：没有 401/403，模型目录条数与改动前一致，
+流式输出正常。若出现 401，**第一嫌疑是第 2 行**（`Cosy-Version` 进了被签名的载荷），其次是第 7 行
+（服务端可能真的在读 `Cosy-Bodyhash`），两者都可以单独回滚定位。
 
 ### 本轮遗留的待改项
 
