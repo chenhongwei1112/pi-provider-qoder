@@ -18,6 +18,12 @@
 - **硬规则**：凡属 WASM 覆盖范围（URL、请求头、签名、请求体编码、响应解密）的结论，必须由预言机实跑输出支撑。字符串搜索只用于定位，不得作为结论——审计过程中已有三条字符串推断结论被实测推翻，见 spec §5。
 - 插件的请求头分散在 `src/cosy.ts:321-341`（`buildAuthHeaders`）和 `src/transport.ts:201-209`（`fetch` 调用点）两处。任何头部比对必须以两者合并后的结果为单位。
 - commit message 用仓库现有风格（`feat:` / `test:` / `docs:` / `refactor:`），不加 `Co-authored-by` 或任何 AI 署名 trailer。
+- **已知红灯（进入本计划前就存在，不要在本计划里修）**：`src/__tests__/cosy.test.ts` 的
+  `getQoderModelListURL > constructs correct global URL` 与 `> constructs correct CN URL`
+  两条失败。它们期望 `.../algo/api/v2/model/list?Encode=1`，而 `8c50899` 把源码改成了
+  `.../api/v2/model/list` 却没改测试。预言机已证明**测试是对的、源码是错的**（台账差异第 1 条）。
+  修它属于第二阶段。因此本计划里任何 `npm test` 门槛都是「只有这 2 个失败，没有第 3 个」，
+  而不是「全绿」。
 
 ---
 
@@ -979,7 +985,7 @@ Run: `npx vitest run src/__tests__/cosy-signature.test.ts`
 Expected: PASS，6 个用例
 
 Run: `npm test`
-Expected: 全量通过，条数与改动前一致（这是行为不变的证据 —— `buildAuthHeaders` 的输出没有任何测试需要修改）
+Expected: `Tests  2 failed | N passed`，且这 2 个失败**只能是** `cosy.test.ts > getQoderModelListURL` 的两条（详见 Global Constraints 的「已知红灯」）。条数与改动前一致就是行为不变的证据 —— `buildAuthHeaders` 的输出没有任何测试需要修改。出现第 3 个失败即为回归。
 
 Run: `npm run check`
 Expected: 无输出（tsc 干净）
@@ -1259,8 +1265,8 @@ Expected: PASS。若「已知差异」三个用例里的数组对不上，**先�
 
 - [ ] **Step 6: 全量验证并提交**
 
-Run: `npm test && npm run check && npm run lint`
-Expected: 三者全绿
+Run: `npm run check; npm run lint; npm test`（分号不用 `&&`：`npm test` 带已知红灯会中断 `&&` 链）
+Expected: `npm run check`、`npm run lint` 全绿；`npm test` 只有 Global Constraints 里记的那 2 个已知失败。
 
 ```bash
 git add src/__tests__/fixtures/cosy-oracle-vectors.json src/__tests__/cosy-oracle-vectors.test.ts scripts/freeze-vectors.mjs package.json
@@ -1365,8 +1371,8 @@ git commit -m "docs: record surface 1 and 2 of the qoder alignment audit"
 
 - [ ] **Step 6: 校验台账自身**
 
-Run: `npm test && npm run check && npm run lint`
-Expected: 全绿
+Run: `npm run check; npm run lint; npm test`（分号不用 `&&`：`npm test` 带已知红灯会中断 `&&` 链）
+Expected: `npm run check`、`npm run lint` 全绿；`npm test` 只有 Global Constraints 里记的那 2 个已知失败。
 
 逐条检查：每条差异都有证据列且证据可定位（向量字段路径、测试用例名，或 `pretty.mjs:<行号>`）；每条都有判定，没有留空；「已验证一致」一节的每条都指向一个真实存在的测试用例。
 
