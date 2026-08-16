@@ -104,9 +104,13 @@ describe("URLs against frozen official vectors", () => {
 });
 
 /**
- * 已知差异清单。它现在是绿的，说明台账如实描述了当前状态;
- * 第二阶段每修掉一条头部差异，这里就会红一次 —— 那是提醒同步更新
+ * 剩余头部差异清单。它现在是绿的，说明台账如实描述了当前状态；
+ * 每修掉一条头部差异，这里就会红一次 —— 那是提醒同步更新
  * docs/qoder-alignment-audit.md，不是让你放宽断言。
+ *
+ * 本轮已修（台账差异第 2、3、4、5、7 行）：`Cosy-Version` 升到 1.1.23、五个头名的
+ * 大小写、补上三个业务标识头、删掉三个签名辅助头。所以大小写那条现在断言的是空数组
+ * —— 保留它，它是"别再退回去"的哨兵。
  */
 describe("known header differences (locked, see docs/qoder-alignment-audit.md)", () => {
   const pluginHeaders = buildAuthHeaders(null, vectors.inferRequest.url, {
@@ -131,41 +135,37 @@ describe("known header differences (locked, see docs/qoder-alignment-audit.md)",
 
   it("still misses exactly these official headers", () => {
     const missing = [...officialNames].filter((n) => !lower(pluginNames).has(n.toLowerCase())).sort();
-    expect(missing).toEqual(["Connection", "Cosy-Business-Product", "Cosy-Business-Type", "Cosy-Scene"]);
+    // Cosy-Business-Product / Cosy-Business-Type / Cosy-Scene 已补齐；Connection 属中风险，未在本轮范围内。
+    expect(missing).toEqual(["Connection"]);
   });
 
   it("still sends exactly these headers the official client does not", () => {
     const extra = [...pluginNames].filter((n) => !lower(officialNames).has(n.toLowerCase())).sort();
+    // Cosy-Bodyhash / Cosy-Bodylength / Cosy-Sigpath 已删。其余五个属中低风险，未在本轮范围内；
+    // 注意 Accept-Encoding 与 Cosy-Clientip 只是"官方不在 infer 上发"，auth GET 上是发的。
     expect(extra).toEqual([
       "Accept-Encoding",
-      "Cosy-Bodyhash",
-      "Cosy-Bodylength",
       "Cosy-Clientip",
       "Cosy-Organization-Id",
       "Cosy-Organization-Tags",
-      "Cosy-Sigpath",
       "X-Request-Id",
     ]);
   });
 
-  it("still spells these headers with different casing than the official client", () => {
+  it("spells every shared header exactly as the official client does", () => {
     const mismatched = [...officialNames]
       .filter((official) => {
         const hit = [...pluginNames].find((p) => p.toLowerCase() === official.toLowerCase());
         return hit !== undefined && hit !== official;
       })
       .sort();
-    expect(mismatched).toEqual([
-      "Cosy-ClientType",
-      "Cosy-MachineId",
-      "Cosy-MachineOS",
-      "Cosy-MachineToken",
-      "Cosy-MachineType",
-    ]);
+    expect(mismatched).toEqual([]);
   });
 
-  it("still pins a stale Cosy-Version", () => {
-    expect(pluginHeaders["Cosy-Version"]).toBe("1.1.3");
-    expect(vectors.inferRequest.headers["Cosy-Version"]).toBe("1.1.23");
+  it("sends the same Cosy-Version as the official client, in the header and in the signed payload", () => {
+    // 这个常量喂两处，所以两处都要对上：请求头，以及被签名的 Authorization 载荷。
+    expect(pluginHeaders["Cosy-Version"]).toBe(vectors.inferRequest.headers["Cosy-Version"]);
+    const payload = JSON.parse(Buffer.from(pluginHeaders.Authorization.split(".")[1], "base64").toString("utf8"));
+    expect(payload.cosyVersion).toBe(vectors.signature.payload.cosyVersion);
   });
 });

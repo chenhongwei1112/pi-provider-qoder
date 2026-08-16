@@ -11,12 +11,19 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
 XcW+ML9FoCI6AOvOzwIDAQAB
 -----END PUBLIC KEY-----`;
 
-// Keep the COSY client identity aligned with the current Qoder CLI catalog
-// protocol. Older values cause the model endpoint to return a reduced list.
-const QoderIDEVersion = "1.1.3";
+// COSY 客户端身份，与 qodercli 1.1.23 的实测值对齐（台账差异第 2、5 行）。
+// 这些值同时进请求头与被签名的 Authorization 载荷，冻结值见
+// `src/__tests__/fixtures/cosy-oracle-vectors.json`。
+const QoderIDEVersion = "1.1.23";
 const QoderClientType = "5";
 const QoderDataPolicy = "disagree";
 const QoderLoginVersion = "v2";
+// 官方 getClientMetadata() 的默认值（`pretty.mjs:400-404`）。官方另支持用
+// QODER_BUSINESS_PRODUCT / QODER_BUSINESS_TYPE / QODER_SCENE 覆盖，插件不支持，
+// 因为 omp 侧没有对应的配置入口 —— 需要时再加。
+const QoderBusinessProduct = "cli";
+const QoderBusinessType = "agent";
+const QoderScene = "assistant";
 
 /**
  * `User-Agent` for this provider's own auxiliary requests: device-code login,
@@ -324,29 +331,27 @@ export function buildAuthHeaders(
 
   const sig = computeCosySignature(payloadB64, cosyKey, timestamp, body, sigPath);
 
-  const bodyHash = crypto
-    .createHash("md5")
-    .update(body || "")
-    .digest("hex");
-  const bodyLen = body ? (Buffer.isBuffer(body) ? body.length : Buffer.from(body).length).toString() : "0";
-
   const machineID = creds.machineID || getMachineId();
 
+  // 头名大小写与官方逐字符一致（台账差异第 3、4 行）：官方是 `Cosy-MachineId` /
+  // `Cosy-MachineToken` / `Cosy-MachineType` / `Cosy-ClientType` / `Cosy-MachineOS`。
+  // 不发 `Cosy-Bodyhash` / `Cosy-Bodylength` / `Cosy-Sigpath`（第 7 行）：官方两类请求
+  // 都不发，把签名的中间量摊在明文头里是最显眼的非官方特征。
   return {
     Authorization: `Bearer COSY.${payloadB64}.${sig}`,
     "Cosy-Key": cosyKey,
     "Cosy-User": creds.userID,
     "Cosy-Date": timestamp,
     "Cosy-Version": QoderIDEVersion,
-    "Cosy-Machineid": machineID,
-    "Cosy-Machinetoken": machineID,
-    "Cosy-Machinetype": QoderMachineTypeMagic,
-    "Cosy-Machineos": QoderMachineOS,
-    "Cosy-Clienttype": QoderClientType,
+    "Cosy-MachineId": machineID,
+    "Cosy-MachineToken": machineID,
+    "Cosy-MachineType": QoderMachineTypeMagic,
+    "Cosy-MachineOS": QoderMachineOS,
+    "Cosy-ClientType": QoderClientType,
+    "Cosy-Business-Product": QoderBusinessProduct,
+    "Cosy-Business-Type": QoderBusinessType,
+    "Cosy-Scene": QoderScene,
     "Cosy-Clientip": "127.0.0.1",
-    "Cosy-Bodyhash": bodyHash,
-    "Cosy-Bodylength": bodyLen,
-    "Cosy-Sigpath": sigPath,
     "Cosy-Data-Policy": QoderDataPolicy,
     "Cosy-Organization-Id": "",
     "Cosy-Organization-Tags": "",
