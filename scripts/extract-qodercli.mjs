@@ -73,7 +73,9 @@ function main() {
   const buf = readFileSync(binPath);
   const { bundle, modules } = parseBunPayload(buf);
 
-  // bundle 尾部有一个 NUL 终止符，esbuild 会因它报 Unexpected "\x00"。
+  // `bundle.end` 是开区间上界，正好落在首个模块锚点的 NUL 上，所以那个 NUL 本来就在范围外
+  // （实测 1.1.23：一个字节都没截掉，末字节是 \n）。这个循环是给「未来布局把填充 NUL 划进
+  // bundle 范围」留的防线 —— esbuild 见到 \x00 会直接报 Unexpected "\x00"。
   let end = bundle.end;
   while (end > bundle.start && buf[end - 1] === 0) end--;
   const bundleBytes = buf.subarray(bundle.start, end);
