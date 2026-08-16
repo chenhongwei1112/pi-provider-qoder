@@ -144,16 +144,25 @@ export async function updateQoderModelsCache(
 ): Promise<void> {
   const modelListURL = getQoderModelListURL(mode);
   try {
-    const headers = buildAuthHeaders(null, modelListURL, {
-      userID,
-      authToken,
-      name,
-      email,
-    });
+    // auth 类：官方在这类请求上发 Cosy-ClientIp 与 Accept-Encoding: identity，
+    // 不发 Connection / Cache-Control（台账差异第 10、11 行）。
+    const headers = buildAuthHeaders(
+      null,
+      modelListURL,
+      {
+        userID,
+        authToken,
+        name,
+        email,
+      },
+      "auth",
+    );
 
     const response = await fetch(modelListURL, {
       method: "GET",
       headers: {
+        // 官方即使是无体 GET 也带 Content-Type（台账差异第 12 行）。
+        "Content-Type": "application/json",
         Accept: "application/json",
         ...headers,
       },

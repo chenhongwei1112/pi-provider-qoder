@@ -1,6 +1,12 @@
 import crypto from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
-import { buildAuthHeaders, computeCosySignature, computeSigPath, resetRuntimeAuthCache } from "../cosy.js";
+import {
+  buildAuthHeaders,
+  computeCosySignature,
+  computeSigPath,
+  normalizeMachineHostname,
+  resetRuntimeAuthCache,
+} from "../cosy.js";
 
 describe("computeSigPath", () => {
   it("strips the /algo prefix the gateway adds", () => {
@@ -74,5 +80,48 @@ describe("runtime auth field lifecycle", () => {
     const requestIdOf = (h: Record<string, string>) =>
       JSON.parse(Buffer.from(h.Authorization.split(".")[1], "base64").toString("utf8")).requestId;
     expect(requestIdOf(second)).not.toBe(requestIdOf(first));
+  });
+});
+
+/**
+ * 台账差异第 13 行：`Cosy-MachineHostname` 的取值规则照官方
+ * `pretty.mjs:69383-69398` 复刻。官方不直接发 `os.hostname()`，因为主机名可能含
+ * 非 ASCII 或空格，塞进 HTTP 头会坏。
+ */
+describe("normalizeMachineHostname", () => {
+  const sha8 = (s: string) => crypto.createHash("sha256").update(s, "utf8").digest("hex").slice(0, 8);
+
+  it("passes a header-safe hostname through unchanged", () => {
+    expect(normalizeMachineHostname("build-box-01")).toBe("build-box-01");
+  });
+
+  it("trims surrounding whitespace before deciding", () => {
+    expect(normalizeMachineHostname("  build-box-01  ")).toBe("build-box-01");
+  });
+
+  it("returns an empty string for a blank hostname, so no header is sent", () => {
+    expect(normalizeMachineHostname("   ")).toBe("");
+  });
+
+  it("punycodes an internationalised hostname rather than hashing it", () => {
+    // 能转成 ASCII 就用 ASCII，这条路径不缀哈希。
+    expect(normalizeMachineHostname("中文主机")).toBe("xn--fiq2a920m0rb");
+  });
+
+  it("replaces unsafe runs with a dash and appends a hash of the original", () => {
+    const raw = "my host\tname";
+    expect(normalizeMachineHostname(raw)).toBe(`my-host-name-${sha8(raw)}`);
+  });
+
+  it("falls back to unknown-<hash> when nothing safe survives", () => {
+    const raw = "\u0000\u0001";
+    expect(normalizeMachineHostname(raw)).toBe(`unknown-${sha8(raw)}`);
+  });
+
+  it("truncates to 96 characters with a hash suffix", () => {
+    const raw = "h".repeat(200);
+    const out = normalizeMachineHostname(raw);
+    expect(out.length).toBeLessThanOrEqual(96);
+    expect(out).toBe(`${"h".repeat(96 - 8 - 1)}-${sha8(raw)}`);
   });
 });

@@ -195,14 +195,16 @@ export async function openQoderStream(request: OpenStreamRequest): Promise<Opene
 
     try {
       // Rebuilt per attempt: the COSY signature covers a timestamp.
-      const headers = buildAuthHeaders(encodedBytes, chatURL, creds);
+      const headers = buildAuthHeaders(encodedBytes, chatURL, creds, "infer");
       const response = await fetch(chatURL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Accept: "text/event-stream",
           "Cache-Control": "no-cache",
-          "Accept-Encoding": "identity",
+          // 官方 infer 请求发 Connection: keep-alive、不发 Accept-Encoding（台账差异
+          // 第 6、11 行）；Accept-Encoding: identity 只出现在 auth 类请求上。
+          Connection: "keep-alive",
           "X-Model-Key": qoderModel,
           "X-Model-Source": modelSource,
           ...headers,

@@ -1,7 +1,8 @@
 import crypto from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
+import { domainToASCII } from "node:url";
 import { agentPath } from "./paths.js";
 
 const qoderRSAPublicKey = `-----BEGIN PUBLIC KEY-----
@@ -333,10 +334,65 @@ export function resetRuntimeAuthCache(): void {
   runtimeAuthCache = undefined;
 }
 
+/**
+ * `Cosy-MachineHostname` 的取值，照官方 `pretty.mjs:69383-69398` 实现。
+ *
+ * 官方不直接发 `os.hostname()`：主机名可能含非 ASCII 或空格，塞进 HTTP 头会坏。
+ * 规则是——本来就 header-safe 就原样发；能 punycode 成 ASCII 就发那个；否则把不安全
+ * 的连续字符压成 `-`，再缀上原值 sha256 的前 8 位；最后统一限长 96 字符，超了就截断
+ * 并同样缀 8 位哈希。全流程无网络、无随机，同一台机器恒定。
+ */
+const HostnameHeaderSafe = /^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/u;
+const HostnameUnsafeRun = /[^\x21-\x7e]+/gu;
+const HostnameMaxLength = 96;
+const HostnameHashLength = 8;
+
+function hostnameHash(value: string): string {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex").slice(0, HostnameHashLength);
+}
+
+function truncateHostname(value: string): string {
+  if (value.length <= HostnameMaxLength) return value;
+  const head = value.slice(0, HostnameMaxLength - HostnameHashLength - 1).replace(/[-\s]+$/u, "");
+  const hash = hostnameHash(value);
+  return head ? `${head}-${hash}` : `unknown-${hash}`;
+}
+
+/** 导出仅为可测：这是官方规范化的逐步复刻，值得单独钉住。 */
+export function normalizeMachineHostname(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  if (HostnameHeaderSafe.test(trimmed)) return truncateHostname(trimmed);
+
+  const ascii = domainToASCII(trimmed);
+  if (ascii && HostnameHeaderSafe.test(ascii)) return truncateHostname(ascii);
+
+  const hash = hostnameHash(trimmed);
+  const slug = trimmed
+    .replace(HostnameUnsafeRun, "-")
+    .replace(/-{2,}/gu, "-")
+    .replace(/^-+|-+$/gu, "");
+  return truncateHostname(slug ? `${slug}-${hash}` : `unknown-${hash}`);
+}
+
+function machineHostnameHeaderValue(): string {
+  return normalizeMachineHostname(hostname());
+}
+
+/**
+ * 官方按请求类发不同的头（台账差异第 6、10、11、12、13 行，实测见冻结向量
+ * `catalogRequest` 与 `inferRequest` 两组 `headerNames`）：
+ * - 只在 auth 类：`Cosy-ClientIp`（值是 machineId，不是真 IP）、`Accept-Encoding: identity`
+ * - 只在 infer 类：`Cache-Control`、`Connection`、`X-Model-Key`、`X-Model-Source`、
+ *   以及 header-safe 时的 `Cosy-MachineHostname`
+ */
+export type CosyRequestClass = "auth" | "infer";
+
 export function buildAuthHeaders(
   body: Buffer | string | null,
   requestURL: string,
   creds: CosyCredentials,
+  requestClass: CosyRequestClass = "infer",
 ): Record<string, string> {
   if (!creds.userID) {
     throw new Error("cosy: user id is empty");
@@ -365,11 +421,12 @@ export function buildAuthHeaders(
 
   const machineID = creds.machineID || getMachineId();
 
-  // 头名大小写与官方逐字符一致（台账差异第 3、4 行）：官方是 `Cosy-MachineId` /
-  // `Cosy-MachineToken` / `Cosy-MachineType` / `Cosy-ClientType` / `Cosy-MachineOS`。
-  // 不发 `Cosy-Bodyhash` / `Cosy-Bodylength` / `Cosy-Sigpath`（第 7 行）：官方两类请求
-  // 都不发，把签名的中间量摊在明文头里是最显眼的非官方特征。
-  return {
+  // 头名大小写与官方逐字符一致（第 3、4 行）。不发 `Cosy-Bodyhash` /
+  // `Cosy-Bodylength` / `Cosy-Sigpath`（第 7 行）：把签名的中间量摊在明文头里是最
+  // 显眼的非官方特征。也不发 `Cosy-Organization-Id` / `-Tags`（第 8 行，官方在本
+  // 审计的取证身份下不发）与 `X-Request-Id`（第 9 行，官方只在 openapi 类请求上发
+  // 且拼作 `X-Request-ID`）。
+  const headers: Record<string, string> = {
     Authorization: `Bearer COSY.${payloadB64}.${sig}`,
     "Cosy-Key": cosyKey,
     "Cosy-User": creds.userID,
@@ -383,11 +440,20 @@ export function buildAuthHeaders(
     "Cosy-Business-Product": QoderBusinessProduct,
     "Cosy-Business-Type": QoderBusinessType,
     "Cosy-Scene": QoderScene,
-    "Cosy-Clientip": "127.0.0.1",
     "Cosy-Data-Policy": QoderDataPolicy,
-    "Cosy-Organization-Id": "",
-    "Cosy-Organization-Tags": "",
     "Login-Version": QoderLoginVersion,
-    "X-Request-Id": crypto.randomUUID(),
   };
+
+  if (requestClass === "auth") {
+    // 官方在 auth 类上把 machineId 当 `Cosy-ClientIp` 发（第 10 行），并要求
+    // `identity` 编码（第 11 行）。插件此前恒发 `127.0.0.1` 且两类都发。
+    headers["Cosy-ClientIp"] = machineID;
+    headers["Accept-Encoding"] = "identity";
+  } else {
+    // 只有 infer-sse 带主机名，且必须是 header-safe 的（第 13 行）。
+    const hostname = machineHostnameHeaderValue();
+    if (hostname) headers["Cosy-MachineHostname"] = hostname;
+  }
+
+  return headers;
 }

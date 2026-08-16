@@ -108,62 +108,84 @@ describe("URLs against frozen official vectors", () => {
  * 每修掉一条头部差异，这里就会红一次 —— 那是提醒同步更新
  * docs/qoder-alignment-audit.md，不是让你放宽断言。
  *
- * 本轮已修（台账差异第 2、3、4、5、7 行）：`Cosy-Version` 升到 1.1.23、五个头名的
- * 大小写、补上三个业务标识头、删掉三个签名辅助头。所以大小写那条现在断言的是空数组
- * —— 保留它，它是"别再退回去"的哨兵。
+ * **两个请求类都比。**官方 auth 类与 infer 类的头集不同（只有 auth 发
+ * `Cosy-ClientIp` 与 `Accept-Encoding`，只有 infer 发 `Cache-Control` /
+ * `Connection` / `X-Model-*`），所以只比 infer 会漏掉一半差异 —— 台账差异第 12 行
+ * （auth GET 缺 `Content-Type`）当初就是这么漏出去的。
  */
-describe("known header differences (locked, see docs/qoder-alignment-audit.md)", () => {
-  const pluginHeaders = buildAuthHeaders(null, vectors.inferRequest.url, {
-    userID: vectors.identity.uid,
-    authToken: "token",
-    name: "n",
-    email: "e",
-    machineID: vectors.identity.machineId,
-  });
-  // transport.ts:201-209 在 fetch 时并入的那几个头,预言机对比必须算进来。
-  const transportHeaders = [
-    "Content-Type",
-    "Accept",
-    "Cache-Control",
-    "Accept-Encoding",
-    "X-Model-Key",
-    "X-Model-Source",
-  ];
-  const pluginNames = new Set([...Object.keys(pluginHeaders), ...transportHeaders]);
-  const officialNames = new Set(vectors.inferRequest.headerNames);
-  const lower = (s: Set<string>) => new Set([...s].map((n) => n.toLowerCase()));
+const identityForHeaders = {
+  userID: vectors.identity.uid,
+  authToken: "token",
+  name: "n",
+  email: "e",
+  machineID: vectors.identity.machineId,
+};
 
-  it("still misses exactly these official headers", () => {
-    const missing = [...officialNames].filter((n) => !lower(pluginNames).has(n.toLowerCase())).sort();
-    // Cosy-Business-Product / Cosy-Business-Type / Cosy-Scene 已补齐；Connection 属中风险，未在本轮范围内。
-    expect(missing).toEqual(["Connection"]);
-  });
+/** fetch 调用点在请求头里并入的那几个，比对时必须算进来。 */
+const transportMergedHeaders = {
+  // transport.ts:199-213
+  infer: ["Content-Type", "Accept", "Cache-Control", "Connection", "X-Model-Key", "X-Model-Source"],
+  // models.ts:161-170
+  auth: ["Content-Type", "Accept"],
+};
 
-  it("still sends exactly these headers the official client does not", () => {
-    const extra = [...pluginNames].filter((n) => !lower(officialNames).has(n.toLowerCase())).sort();
-    // Cosy-Bodyhash / Cosy-Bodylength / Cosy-Sigpath 已删。其余五个属中低风险，未在本轮范围内；
-    // 注意 Accept-Encoding 与 Cosy-Clientip 只是"官方不在 infer 上发"，auth GET 上是发的。
-    expect(extra).toEqual([
-      "Accept-Encoding",
-      "Cosy-Clientip",
-      "Cosy-Organization-Id",
-      "Cosy-Organization-Tags",
-      "X-Request-Id",
-    ]);
-  });
+const lower = (s: Set<string>) => new Set([...s].map((n) => n.toLowerCase()));
 
-  it("spells every shared header exactly as the official client does", () => {
-    const mismatched = [...officialNames]
+function headerDiff(requestClass: "auth" | "infer") {
+  const frozen = requestClass === "auth" ? vectors.catalogRequest : vectors.inferRequest;
+  const pluginHeaders = buildAuthHeaders(null, frozen.url, identityForHeaders, requestClass);
+  const pluginNames = new Set([...Object.keys(pluginHeaders), ...transportMergedHeaders[requestClass]]);
+  const officialNames = new Set(frozen.headerNames);
+  return {
+    pluginHeaders,
+    missing: [...officialNames].filter((n) => !lower(pluginNames).has(n.toLowerCase())).sort(),
+    extra: [...pluginNames].filter((n) => !lower(officialNames).has(n.toLowerCase())).sort(),
+    mismatched: [...officialNames]
       .filter((official) => {
         const hit = [...pluginNames].find((p) => p.toLowerCase() === official.toLowerCase());
         return hit !== undefined && hit !== official;
       })
-      .sort();
-    expect(mismatched).toEqual([]);
+      .sort(),
+  };
+}
+
+describe("known header differences (locked, see docs/qoder-alignment-audit.md)", () => {
+  it("sends every official header on the infer request", () => {
+    // `Cosy-MachineHostname` 是官方发、插件也发的，但值随机器变化，故不冻结进向量
+    // （台账差异第 13 行），所以它在这里既不算缺失也不算多发。
+    expect(headerDiff("infer").missing).toEqual([]);
+  });
+
+  it("sends nothing extra on the infer request", () => {
+    expect(headerDiff("infer").extra).toEqual(["Cosy-MachineHostname"]);
+  });
+
+  it("sends every official header on the auth request", () => {
+    expect(headerDiff("auth").missing).toEqual([]);
+  });
+
+  it("sends nothing extra on the auth request", () => {
+    expect(headerDiff("auth").extra).toEqual([]);
+  });
+
+  it("spells every shared header exactly as the official client does, on both request classes", () => {
+    expect(headerDiff("infer").mismatched).toEqual([]);
+    expect(headerDiff("auth").mismatched).toEqual([]);
+  });
+
+  it("keeps Cosy-ClientIp and Accept-Encoding on the auth class only", () => {
+    // 官方的 `Cosy-ClientIp` 值是 machineId，不是真 IP —— 插件此前恒发 127.0.0.1。
+    const auth = headerDiff("auth").pluginHeaders;
+    expect(auth["Cosy-ClientIp"]).toBe(vectors.catalogRequest.headers["Cosy-ClientIp"]);
+    expect(auth["Accept-Encoding"]).toBe(vectors.catalogRequest.headers["Accept-Encoding"]);
+    const infer = headerDiff("infer").pluginHeaders;
+    expect(infer["Cosy-ClientIp"]).toBeUndefined();
+    expect(infer["Accept-Encoding"]).toBeUndefined();
   });
 
   it("sends the same Cosy-Version as the official client, in the header and in the signed payload", () => {
     // 这个常量喂两处，所以两处都要对上：请求头，以及被签名的 Authorization 载荷。
+    const { pluginHeaders } = headerDiff("infer");
     expect(pluginHeaders["Cosy-Version"]).toBe(vectors.inferRequest.headers["Cosy-Version"]);
     const payload = JSON.parse(Buffer.from(pluginHeaders.Authorization.split(".")[1], "base64").toString("utf8"));
     expect(payload.cosyVersion).toBe(vectors.signature.payload.cosyVersion);
