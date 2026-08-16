@@ -5,7 +5,7 @@
 import { existsSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
-export const AUDIT_DIR = ".qoder-audit";
+const AUDIT_DIR = ".qoder-audit";
 
 export function findAuditDir() {
   if (!existsSync(AUDIT_DIR)) return null;

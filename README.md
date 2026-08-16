@@ -244,6 +244,38 @@ Verified end to end against omp: startup registration, catalogue listing
 interactive `/login` device-code flow is unchanged from upstream and was not
 re-exercised here.
 
+## Official-alignment audit
+
+`docs/qoder-alignment-audit.md` is a 56-row ledger of every measured difference
+between this plugin and the official `qodercli` 1.1.23, with a verdict and a risk
+level per row and a phase-2 entry order at the end. Phase 1 only measured and
+recorded; nothing in that ledger has been fixed yet.
+
+The rule the ledger is built on: any claim about URLs, request headers,
+signatures, body encoding or response decryption has to come from running the
+official WASM, never from reading decompiled source. Three plausible-looking
+conclusions in this project were already disproved that way.
+
+Regenerating the evidence needs a local Qoder CLI at
+`~/.qoder/bin/qodercli/qodercli-<version>`, then:
+
+```bash
+npm run audit:extract   # unpack the CLI into .qoder-audit/<version>/ (gitignored)
+npm run audit:oracle    # 6 cases: does the official WASM still behave as recorded?
+npm run audit:freeze    # rewrite src/__tests__/fixtures/cosy-oracle-vectors.json
+```
+
+Run them in that order; each consumes the previous one's output. `audit:oracle`
+is the gate worth watching: it asserts the official URLs, the signature formula
+and the client identity against the freshly extracted WASM, so it is what catches
+a Qoder upgrade that changed behaviour. The frozen vectors are committed on
+purpose, so `npm test` needs no Qoder install; only these three scripts do.
+
+`src/__tests__/cosy-oracle-vectors.test.ts` also locks the known differences, and
+it deliberately asserts today's **wrong** header set. Fixing a header in phase 2
+is supposed to turn it red — that red is the reminder to update the ledger in the
+same commit.
+
 ## License
 
 MIT
