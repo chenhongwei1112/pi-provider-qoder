@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { parseBunPayload, readTextModule } from "./bun-binary.mjs";
+import { carveGlue } from "./carve-glue.mjs";
 
 const QODERCLI_DIR = join(homedir(), ".qoder", "bin", "qodercli");
 const OUT_ROOT = ".qoder-audit";
@@ -89,6 +90,10 @@ function main() {
   const prettyPath = join(outDir, "pretty.mjs");
   prettyPrint(bundlePath, prettyPath);
 
+  const glue = carveGlue(readFileSync(prettyPath, "utf8"));
+  if (!glue.includes(" as prepareWasmAuthenticatedRequest")) throw new Error("extract: carved glue lost its exports");
+  writeFileSync(join(outDir, "glue.mjs"), glue);
+
   const bundleSource = bundleBytes.toString("utf8");
   const wasm = selectAuthWasm(bundleSource);
   if (wasm.length < 100_000) throw new Error(`extract: auth wasm is only ${wasm.length} bytes; suspicious`);
@@ -107,6 +112,7 @@ function main() {
   console.log(`  bundle.js                 ${bundleBytes.length} bytes`);
   console.log(`  qoder_auth_wasm_bg.wasm   ${wasm.length} bytes`);
   console.log(`  chat.proto                ${proto.length} bytes`);
+  console.log(`  glue.mjs                  ${Buffer.byteLength(glue)} bytes`);
   console.log(`  modules.json              ${modules.length} modules`);
 }
 
