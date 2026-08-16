@@ -24,6 +24,12 @@
   `.../api/v2/model/list` 却没改测试。预言机已证明**测试是对的、源码是错的**（台账差异第 1 条）。
   修它属于第二阶段。因此本计划里任何 `npm test` 门槛都是「只有这 2 个失败，没有第 3 个」，
   而不是「全绿」。
+- **已知红灯之二（同样早于本计划）**：`npm run check` 有 4 条 `TS2367`，全在
+  `src/request.ts:83` 与 `:146`（`string | undefined` 与 `boolean` 比较、
+  `ThinkingLevel | undefined` 与 `"off"` 比较）。已核实 `src/request.ts` 与本计划基线
+  `9f82353` 逐字节相同，故与本计划无关。修它属于第二阶段（这 4 条是真 bug，不是噪声：
+  两个比较恒为 false）。因此本计划里 `npm run check` 的门槛是「只有 request.ts 这 4 条，
+  没有第 5 条、且不涉及本计划新增的文件」，而不是「无输出」。
 
 ---
 
@@ -1288,7 +1294,7 @@ Expected: PASS。若「已知差异」三个用例里的数组对不上，**先�
 - [ ] **Step 6: 全量验证并提交**
 
 Run: `npm run check; npm run lint; npm test`（分号不用 `&&`：`npm test` 带已知红灯会中断 `&&` 链）
-Expected: `npm run check`、`npm run lint` 全绿；`npm test` 只有 Global Constraints 里记的那 2 个已知失败。
+Expected: `npm run lint` 全绿；`npm run check` 只有 `src/request.ts` 那 4 条已知 `TS2367`；`npm test` 只有 Global Constraints 里记的那 2 个已知失败。三者都不得出现涉及本计划新增文件的新条目。
 
 ```bash
 git add src/__tests__/fixtures/cosy-oracle-vectors.json src/__tests__/cosy-oracle-vectors.test.ts scripts/freeze-vectors.mjs package.json
@@ -1394,7 +1400,7 @@ git commit -m "docs: record surface 1 and 2 of the qoder alignment audit"
 - [ ] **Step 6: 校验台账自身**
 
 Run: `npm run check; npm run lint; npm test`（分号不用 `&&`：`npm test` 带已知红灯会中断 `&&` 链）
-Expected: `npm run check`、`npm run lint` 全绿；`npm test` 只有 Global Constraints 里记的那 2 个已知失败。
+Expected: `npm run lint` 全绿；`npm run check` 只有 `src/request.ts` 那 4 条已知 `TS2367`；`npm test` 只有 Global Constraints 里记的那 2 个已知失败。三者都不得出现涉及本计划新增文件的新条目。
 
 逐条检查：每条差异都有证据列且证据可定位（向量字段路径、测试用例名，或 `pretty.mjs:<行号>`）；每条都有判定，没有留空；「已验证一致」一节的每条都指向一个真实存在的测试用例。
 
