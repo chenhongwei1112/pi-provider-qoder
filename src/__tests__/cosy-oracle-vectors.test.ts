@@ -1,7 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildAuthHeaders, computeCosySignature, computeSigPath, getQoderChatURL } from "../cosy.js";
+import {
+  buildAuthHeaders,
+  computeCosySignature,
+  computeSigPath,
+  getQoderChatURL,
+  getQoderModelListURL,
+} from "../cosy.js";
 import { parseQoderJsonBody, qoderDecodeBody, qoderEncodeBody } from "../qoder-encoding.js";
 
 interface OracleVectors {
@@ -82,9 +88,18 @@ describe("body de-obfuscation against frozen official vectors", () => {
   });
 });
 
-describe("chat URL against frozen official vectors", () => {
+describe("URLs against frozen official vectors", () => {
   it("matches the official infer URL", () => {
     expect(getQoderChatURL("global")).toBe(vectors.inferRequest.url);
+  });
+
+  /**
+   * 这条是为防 `8c50899` 那类回归而存在的：那次提交按"读反编译代码"的推断删掉了
+   * `/algo` 与 `Encode=1`，而 cosy.test.ts 里写死正确值的两条用例被留在红灯状态。
+   * 用冻结的官方值来断言，就没有"改源码顺手改断言"的空间了。
+   */
+  it("matches the official model catalog URL", () => {
+    expect(getQoderModelListURL("global")).toBe(vectors.catalogRequest.url);
   });
 });
 

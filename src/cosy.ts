@@ -93,11 +93,11 @@ export function getQoderCenterUrl(mode?: string): string {
 }
 
 export function getQoderModelListURL(mode?: string): string {
-  // 与 qodercli 1.1.23 对齐（反编译实证）：目录端点是 /api/v2/model/list，
-  // 不带 /algo 前缀、不带 Encode=1。/algo 端点返回的是 chat 场景的缩减目录
-  // （16 个模型，无 dogfood 条目），而 qodercli 用这个端点能拿到完整目录
-  // （38 个跨场景条目，含 qwen3.8-v120-dogfood-crit）。
-  return `${getQoderBaseUrl(mode)}api/v2/model/list`;
+  // 与 qodercli 1.1.23 对齐，由预言机实跑确认（台账差异第 1 行）：官方目录端点是
+  // `/algo/api/v2/model/list?Encode=1`。此前这里去掉了 `/algo` 与 `Encode=1`，
+  // 依据是读反编译代码得出的推断，而预言机直接推翻了它 —— 冻结值见
+  // `src/__tests__/fixtures/cosy-oracle-vectors.json` 的 `catalogRequest.url`。
+  return `${getQoderBaseUrl(mode)}algo/api/v2/model/list?Encode=1`;
 }
 
 export function getQoderChatURL(mode?: string): string {
