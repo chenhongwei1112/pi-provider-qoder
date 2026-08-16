@@ -99,26 +99,37 @@ export async function exchangeJobToken(pat: string, mode: string = getQoderMode(
   };
 }
 
-/** Fetch user profile using a job token (jt-...). Best-effort. */
-async function fetchUserInfo(jobToken: string, mode: string): Promise<{ userID: string; email: string; name: string }> {
+/**
+ * 用 job token 取用户资料。best-effort。
+ *
+ * 读的字段跟着官方走（`pretty.mjs:114999-115002`）：uid 与 name 各有三个别名，
+ * 组织信息还有驼峰与嵌套两种写法。组织字段不是可选装饰 —— 它们决定 WASM 是否发
+ * `Cosy-Organization-Id` / `-Tags`，也是 `info` 明文的组成部分（台账差异第 8、14、49 行）。
+ */
+async function fetchUserInfo(
+  jobToken: string,
+  mode: string,
+): Promise<{
+  userID: string;
+  email: string;
+  name: string;
+  organizationID: string;
+  organizationTags: string[];
+}> {
   let userID = "";
   let email = "";
   let name = "";
+  let organizationID = "";
+  let organizationTags: string[] = [];
   try {
     const res = await fetch(getQoderUserInfoURL(mode), {
       headers: {
         Authorization: `Bearer ${jobToken}`,
         Accept: "application/json",
         "User-Agent": ProviderUserAgent,
-        "Cosy-Version": "1.0.1",
-        "Cosy-ClientType": "5",
       },
     });
     if (res.ok) {
-      // 官方读三个 uid 别名并在缺失时硬失败（`pretty.mjs:114999-115002`）。插件此前
-      // 只读 `id`，服务端一旦返回 `uid` 就会拿到空串，接着 `buildAuthHeaders` 抛
-      // `cosy: user id is empty`。别名照抄官方，包括 name 的三个别名。
-      // 台账差异第 49 行。
       const info = (await res.json()) as {
         id?: string;
         user_id?: string;
@@ -127,15 +138,24 @@ async function fetchUserInfo(jobToken: string, mode: string): Promise<{ userID: 
         name?: string;
         username?: string;
         user_name?: string;
+        orgId?: string;
+        organization_id?: string;
+        organizationId?: string;
+        organization?: { id?: string };
+        organization_tags?: unknown;
+        organizationTags?: unknown;
       };
       userID = info.id || info.user_id || info.uid || "";
       email = info.email || "";
       name = info.name || info.username || info.user_name || "";
+      organizationID = info.orgId || info.organization_id || info.organizationId || info.organization?.id || "";
+      const tags = info.organization_tags ?? info.organizationTags;
+      organizationTags = Array.isArray(tags) ? tags.filter((t): t is string => typeof t === "string") : [];
     }
   } catch (e) {
     console.error("[pi-provider-qoder] Failed to fetch user info:", e);
   }
-  return { userID, email, name };
+  return { userID, email, name, organizationID, organizationTags };
 }
 
 /**
@@ -145,7 +165,7 @@ async function fetchUserInfo(jobToken: string, mode: string): Promise<{ userID: 
  */
 export async function credentialsFromPat(pat: string, mode: string = getQoderMode()): Promise<OAuthCredentials> {
   const { jobToken, jobRefreshToken, expiresAt } = await exchangeJobToken(pat, mode);
-  const { userID, email, name } = await fetchUserInfo(jobToken, mode);
+  const { userID, email, name, organizationID, organizationTags } = await fetchUserInfo(jobToken, mode);
   const machineID = getMachineId();
   const defaults = qoderIdentityDefaults(mode);
 
@@ -157,5 +177,10 @@ export async function credentialsFromPat(pat: string, mode: string = getQoderMod
     email: email || defaults.email,
     name: name || defaults.name,
     machineID,
+    // 组织信息进凭据是因为签名层要用：它决定是否发 `Cosy-Organization-*`，也是 `info`
+    // 明文的一部分（台账差异第 8、14 行）。omp 的 AuthStorage 原样保存多余字段，
+    // userID / machineID 已经是这么带过来的。
+    organizationID,
+    organizationTags,
   } as OAuthCredentials;
 }

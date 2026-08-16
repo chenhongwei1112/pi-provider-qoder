@@ -146,3 +146,43 @@ describe.skipIf(!auditDir)("cosy oracle against the official wasm", () => {
     }
   });
 });
+
+/**
+ * 组织字段与 data policy 会改变 WASM 产出的请求头（台账差异第 8 行的修正依据）。
+ * 早期取证只喂了三段 user-info，于是误判成"官方不发组织头"。
+ */
+describe.skipIf(!auditDir)("official header set depends on the organization fields", () => {
+  const base = {
+    machineId: "0123456789abcdef0123456789abcdef",
+    uid: "test-user-id",
+    encryptUserInfo: "EUI",
+    key: "KEY123",
+    cosyVersion: "1.1.23",
+  };
+  const catalog = { endpoint: "https://api3.qoder.sh", path: "/api/v2/model/list?Encode=1", method: "GET" };
+
+  it("omits both organization headers when the credential has no organization", async () => {
+    const oracle = await createOracle({ auditDir, ...base });
+    const names = Object.keys(oracle.authRequest(catalog).headers);
+    expect(names.filter((n) => /organization/i.test(n))).toEqual([]);
+  });
+
+  it("sends both organization headers when the credential has one, joining tags with a comma", async () => {
+    const oracle = await createOracle({
+      auditDir,
+      ...base,
+      organizationId: "org-42",
+      organizationTags: ["tag-a", "tag-b"],
+    });
+    const headers = oracle.authRequest(catalog).headers;
+    expect(headers["Cosy-Organization-Id"]).toBe("org-42");
+    expect(headers["Cosy-Organization-Tags"]).toBe("tag-a,tag-b");
+  });
+
+  it("projects data_policy_agreed onto Cosy-Data-Policy", async () => {
+    const disagreed = await createOracle({ auditDir, ...base, dataPolicyAgreed: false });
+    expect(disagreed.authRequest(catalog).headers["Cosy-Data-Policy"]).toBe("disagree");
+    const agreed = await createOracle({ auditDir, ...base, dataPolicyAgreed: true });
+    expect(agreed.authRequest(catalog).headers["Cosy-Data-Policy"]).toBe("agree");
+  });
+});

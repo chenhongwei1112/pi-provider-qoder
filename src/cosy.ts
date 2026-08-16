@@ -17,7 +17,6 @@ XcW+ML9FoCI6AOvOzwIDAQAB
 // `src/__tests__/fixtures/cosy-oracle-vectors.json`。
 const QoderIDEVersion = "1.1.23";
 const QoderClientType = "5";
-const QoderDataPolicy = "disagree";
 const QoderLoginVersion = "v2";
 // 官方 getClientMetadata() 的默认值（`pretty.mjs:400-404`）。官方另支持用
 // QODER_BUSINESS_PRODUCT / QODER_BUSINESS_TYPE / QODER_SCENE 覆盖，插件不支持，
@@ -47,12 +46,16 @@ const QoderModeEnv = process.env.QODER_REGION || process.env.QODER_BACKEND || pr
 
 export type QoderMode = "global" | "cn";
 
+/**
+ * `info` 的明文。官方喂给 `generate_runtime_auth_fields` 的正是这四个字段
+ * （`pretty.mjs:114929`，台账差异第 14 行）—— 没有 token、没有 name、没有 email。
+ * 早前插件塞的是 `{uid, security_oauth_token, name, aid, email}`。
+ */
 interface UserInfo {
   uid: string;
-  security_oauth_token: string;
-  name: string;
-  aid: string;
-  email: string;
+  organization_id: string;
+  organization_tags: string[];
+  data_policy_agreed: boolean;
 }
 
 interface CosyPayload {
@@ -62,13 +65,21 @@ interface CosyPayload {
   cosyVersion: string;
   ideVersion: string;
 }
-
 export interface CosyCredentials {
   userID: string;
   authToken: string;
   name: string;
   email: string;
   machineID?: string;
+  /** 来自 `/api/v1/userinfo`。决定是否发 `Cosy-Organization-*`，也进 `info` 明文。 */
+  organizationID?: string;
+  organizationTags?: string[];
+  /**
+   * data policy 是否已同意。官方由 `fetchAndApplyDataPolicy` 拉取，插件不调那个接口，
+   * 所以默认 false —— 这与插件一直硬编码的 `Cosy-Data-Policy: disagree` 等价（实测：
+   * WASM 把 `data_policy_agreed` 投影成该头，false → disagree、true → agree）。
+   */
+  dataPolicyAgreed?: boolean;
 }
 
 export function getQoderMode(modeOverride?: string): QoderMode {
@@ -309,7 +320,12 @@ export function getMachineId(): string {
 let runtimeAuthCache: { key: string; infoB64: string; cosyKey: string } | undefined;
 
 function runtimeAuthFields(creds: CosyCredentials): { infoB64: string; cosyKey: string } {
-  const cacheKey = `${creds.userID}\n${creds.authToken}\n${creds.name || ""}\n${creds.email || ""}`;
+  const organizationID = creds.organizationID || "";
+  const organizationTags = creds.organizationTags ?? [];
+  const dataPolicyAgreed = creds.dataPolicyAgreed ?? false;
+  const cacheKey = [creds.userID, creds.authToken, organizationID, organizationTags.join(","), dataPolicyAgreed].join(
+    "\n",
+  );
   if (runtimeAuthCache?.key === cacheKey) {
     return { infoB64: runtimeAuthCache.infoB64, cosyKey: runtimeAuthCache.cosyKey };
   }
@@ -317,10 +333,9 @@ function runtimeAuthFields(creds: CosyCredentials): { infoB64: string; cosyKey: 
   const aesKey = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
   const userInfo: UserInfo = {
     uid: creds.userID,
-    security_oauth_token: creds.authToken,
-    name: creds.name || "",
-    aid: "",
-    email: creds.email || "",
+    organization_id: organizationID,
+    organization_tags: organizationTags,
+    data_policy_agreed: dataPolicyAgreed,
   };
 
   const infoB64 = aesEncryptCBCBase64(JSON.stringify(userInfo), aesKey);
@@ -440,9 +455,15 @@ export function buildAuthHeaders(
     "Cosy-Business-Product": QoderBusinessProduct,
     "Cosy-Business-Type": QoderBusinessType,
     "Cosy-Scene": QoderScene,
-    "Cosy-Data-Policy": QoderDataPolicy,
+    "Cosy-Data-Policy": creds.dataPolicyAgreed ? "agree" : "disagree",
     "Login-Version": QoderLoginVersion,
   };
+
+  // 组织头按需发（台账差异第 8 行修正）。实测：WASM 只在 user-info 带
+  // `organization_id` / `organization_tags` 时才产出这两个头，tags 用 `,` 连接；
+  // 没有组织就完全不发。插件此前恒发两个空串，那是两头都不像。
+  if (creds.organizationID) headers["Cosy-Organization-Id"] = creds.organizationID;
+  if (creds.organizationTags?.length) headers["Cosy-Organization-Tags"] = creds.organizationTags.join(",");
 
   if (requestClass === "auth") {
     // 官方在 auth 类上把 machineId 当 `Cosy-ClientIp` 发（第 10 行），并要求

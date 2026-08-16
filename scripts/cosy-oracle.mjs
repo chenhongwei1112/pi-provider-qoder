@@ -19,7 +19,17 @@ export function findAuditDir() {
   return resolve(AUDIT_DIR, versions.at(-1));
 }
 
-export async function createOracle({ auditDir, machineId, uid, encryptUserInfo, key, cosyVersion }) {
+export async function createOracle({
+  auditDir,
+  machineId,
+  uid,
+  encryptUserInfo,
+  key,
+  cosyVersion,
+  organizationId,
+  organizationTags,
+  dataPolicyAgreed,
+}) {
   const glue = await import(`file://${resolve(auditDir, "glue.mjs")}`);
   glue.initEnvModule();
   // `initWasmModule()` 实测是冗余的（去掉它 `initWasm()` 依然能跑通），但保留是故意的：
@@ -28,12 +38,23 @@ export async function createOracle({ auditDir, machineId, uid, encryptUserInfo, 
   glue.initWasmModule();
   await glue.initWasm();
 
-  // userInfoJson 的三段值由调用方给定，WASM 只负责原样回放（这是预言机能拿它做
-  // 对照的前提）。注意：官方客户端里这两个值**不是**服务端下发的 —— 每条登录路径
-  // 都先置空（pretty.mjs:114651 PAT / :114720 job_token / :114939 browser /
-  // :115056 external），再由 regenerateRuntimeFields() 本地经 WASM 导出
-  // generate_runtime_auth_fields 算出（:114927-114931）。详见台账差异第 14 行。
-  glue.createContext(machineId, cosyVersion, JSON.stringify({ uid, encrypt_user_info: encryptUserInfo, key }));
+  // 官方交给 QoderContext 的 user-info 是六个字段（`pretty.mjs:114847`），不是三个。
+  // 组织字段与 data policy 会直接影响 WASM 产出的请求头，实测：
+  //   - 带 organization_id / organization_tags 时才有 `Cosy-Organization-Id` /
+  //     `-Tags`（tags 用 `,` 连接）；不带就完全不发这两个头
+  //   - `Cosy-Data-Policy` 是 data_policy_agreed 的投影：false → disagree、true → agree
+  // 早期只喂三段，所以台账第 8 行一度误判成"官方不发组织头"。
+  //
+  // `encrypt_user_info` 与 `key` 由调用方给定、WASM 原样回放（这是预言机能做对照的
+  // 前提）。注意官方客户端里这两个值**不是**服务端下发的：每条登录路径都先置空
+  // （`:114651` PAT / `:114720` job_token / `:114939` browser / `:115056` external），
+  // 再由 `regenerateRuntimeFields()` 本地经 `generate_runtime_auth_fields` 算出
+  // （`:114927-114931`）。详见台账差异第 14 行。
+  const userInfo = { uid, encrypt_user_info: encryptUserInfo, key };
+  if (organizationId !== undefined) userInfo.organization_id = organizationId;
+  if (organizationTags !== undefined) userInfo.organization_tags = organizationTags;
+  if (dataPolicyAgreed !== undefined) userInfo.data_policy_agreed = dataPolicyAgreed;
+  glue.createContext(machineId, cosyVersion, JSON.stringify(userInfo));
 
   return {
     clientMetadata: () => glue.getClientMetadata(),

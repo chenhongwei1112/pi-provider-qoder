@@ -125,3 +125,57 @@ describe("normalizeMachineHostname", () => {
     expect(out).toBe(`${"h".repeat(96 - 8 - 1)}-${sha8(raw)}`);
   });
 });
+
+/**
+ * 组织信息与 data policy（台账差异第 8、14 行）。预言机实测：官方的 WASM 只在
+ * user-info 带 `organization_id` / `organization_tags` 时才产出这两个头，tags 用 `,`
+ * 连接；`Cosy-Data-Policy` 则是 `data_policy_agreed` 的投影。
+ */
+describe("organization headers and data policy", () => {
+  const url = "https://api3.qoder.sh/algo/api/v2/model/list?Encode=1";
+  const base = { userID: "u-1", authToken: "jt-1", name: "Ada", email: "ada@x.com", machineID: "m-1" };
+
+  beforeEach(() => {
+    resetRuntimeAuthCache();
+  });
+
+  it("omits both organization headers when the credential has no organization", () => {
+    const headers = buildAuthHeaders(null, url, base, "auth");
+    expect(headers["Cosy-Organization-Id"]).toBeUndefined();
+    expect(headers["Cosy-Organization-Tags"]).toBeUndefined();
+  });
+
+  it("sends both organization headers when the credential has one, joining tags with a comma", () => {
+    const headers = buildAuthHeaders(
+      null,
+      url,
+      { ...base, organizationID: "org-42", organizationTags: ["tag-a", "tag-b"] },
+      "auth",
+    );
+    expect(headers["Cosy-Organization-Id"]).toBe("org-42");
+    expect(headers["Cosy-Organization-Tags"]).toBe("tag-a,tag-b");
+  });
+
+  it("projects dataPolicyAgreed onto Cosy-Data-Policy", () => {
+    expect(buildAuthHeaders(null, url, base, "auth")["Cosy-Data-Policy"]).toBe("disagree");
+    resetRuntimeAuthCache();
+    expect(buildAuthHeaders(null, url, { ...base, dataPolicyAgreed: true }, "auth")["Cosy-Data-Policy"]).toBe("agree");
+  });
+
+  it("encrypts exactly the four fields the official client encrypts", () => {
+    // info 是 AES-CBC 密文，测不了内容，但它的长度是 PKCS7(明文字节数) 的函数，
+    // 所以用长度反证明文形状：官方四字段的 JSON 里没有 token / name / email。
+    const withToken = buildAuthHeaders(null, url, { ...base, authToken: "x".repeat(400) }, "auth");
+    resetRuntimeAuthCache();
+    const withShortToken = buildAuthHeaders(null, url, { ...base, authToken: "y" }, "auth");
+    const infoOf = (h: Record<string, string>) =>
+      JSON.parse(Buffer.from(h.Authorization.split(".")[1], "base64").toString("utf8")).info as string;
+    // token 长了 400 字节而 info 长度不变 ⇒ token 没有进明文。
+    expect(infoOf(withToken).length).toBe(infoOf(withShortToken).length);
+
+    resetRuntimeAuthCache();
+    const withOrg = buildAuthHeaders(null, url, { ...base, organizationID: "o".repeat(200) }, "auth");
+    // 组织 id 长了 200 字节而 info 变长 ⇒ 它确实在明文里。
+    expect(infoOf(withOrg).length).toBeGreaterThan(infoOf(withShortToken).length);
+  });
+});
