@@ -294,13 +294,52 @@ export function getMachineId(): string {
       } catch {}
     }
   }
-  const newId = crypto.randomUUID();
+  // No stored id anywhere. Prefer the official hardware-derived value
+  // (`pretty.mjs:76181-76209`) over a random one: a machine that runs both this
+  // plugin and the official client then reports ONE device fingerprint instead
+  // of two (ledger row 51). On this class of host the DMI uuid is root-only,
+  // so derivation returns undefined here and the random fallback applies.
+  const newId = deriveMachineIdFromHardware() ?? crypto.randomUUID();
   try {
     const savePath = paths[1];
     mkdirSync(dirname(savePath), { recursive: true });
     writeFileSync(savePath, newId, "utf8");
   } catch {}
   return newId;
+}
+
+/** Official machine-id salt (`pretty.mjs:76498`). */
+const MachineIdSalt = "qoder-machine-id:v1";
+
+/**
+ * Derive the machine id from the DMI product uuid exactly as the official
+ * client does (`pretty.mjs:76181-76209`): sha256 over
+ * `<salt>:linux:<uuid lowercased>`, take the first 16 bytes, set the UUID v4
+ * variant/version bits, format as 8-4-4-4-12 (`Muf`/`Cuf`,
+ * `pretty.mjs:76167-76173`). Returns undefined when the uuid is unreadable or
+ * a placeholder — the official validator (`Uuf`, `pretty.mjs:76175-76179`)
+ * rejects empty / all-zero / all-`f` / OEM filler values.
+ *
+ * The official read runs under a 1s timeout with an async system call. This
+ * version is sync and only used as a fallback when no stored id exists, so the
+ * common path (a stored id) never touches the filesystem for this at all.
+ */
+export function deriveMachineIdFromHardware(): string | undefined {
+  let uuid: string;
+  try {
+    uuid = readFileSync("/sys/class/dmi/id/product_uuid", "utf8").trim().toLowerCase();
+  } catch {
+    return undefined;
+  }
+  if (!uuid || uuid === "-" || uuid === "unknown" || uuid === "none") return undefined;
+  const alnum = uuid.replace(/[^a-z0-9]/g, "");
+  if (alnum.length === 0 || /^0+$/.test(alnum) || /^f+$/.test(alnum)) return undefined;
+  const digest = crypto.createHash("sha256").update(`${MachineIdSalt}:linux:${uuid}`).digest();
+  const bytes = Buffer.from(digest.subarray(0, 16));
+  bytes[6] = (bytes[6] & 15) | 64;
+  bytes[8] = (bytes[8] & 63) | 128;
+  const hex = bytes.toString("hex");
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20, 32)].join("-");
 }
 
 /**

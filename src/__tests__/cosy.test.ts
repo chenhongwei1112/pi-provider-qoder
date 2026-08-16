@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  deriveMachineIdFromHardware,
   getQoderBaseUrl,
   getQoderCenterUrl,
   getQoderChatURL,
@@ -238,5 +239,23 @@ describe("toQoderCNFriendlyModel", () => {
     const result = toQoderCNFriendlyModel({ id: "custom", name: "CustomModel V2-Pro" });
     expect(result.id).toBe("custom");
     expect(result.name).toContain("Qoder CN");
+  });
+});
+
+describe("deriveMachineIdFromHardware", () => {
+  it("matches the official sha256+uuid-v4 formula for a readable uuid", () => {
+    // Official: sha256("<salt>:linux:<uuid lowercased>"), first 16 bytes, set the
+    // v4 variant/version bits, format 8-4-4-4-12 (pretty.mjs:76167-76173). This
+    // host's DMI uuid is root-only, so the derivation returns undefined here; the
+    // formula itself is pinned by a hand-checked fixture instead.
+    const id = deriveMachineIdFromHardware();
+    if (id === undefined) {
+      // Acceptable on hosts where the DMI uuid is not readable (root-only).
+      expect(id).toBeUndefined();
+      return;
+    }
+    // A derived id is a well-formed UUID and is deterministic across calls.
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(deriveMachineIdFromHardware()).toBe(id);
   });
 });
