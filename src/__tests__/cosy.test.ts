@@ -11,7 +11,6 @@ import {
   getQoderMode,
   getQoderModelListURL,
   getQoderOpenApiUrl,
-  getQoderRefreshURL,
   getQoderUsageURL,
   getQoderUserEmailFallback,
   getQoderUserInfoURL,
@@ -131,13 +130,16 @@ describe("getQoderUsageURL", () => {
   });
 });
 
-describe("getQoderRefreshURL", () => {
-  it("constructs correct CN URL", () => {
-    expect(getQoderRefreshURL("cn")).toBe("https://gateway.qoder.com.cn/algo/api/v3/user/refresh_token");
-  });
-
-  it("constructs correct global URL", () => {
-    expect(getQoderRefreshURL("global")).toBe("https://center.qoder.sh/algo/api/v3/user/refresh_token");
+describe("the device-token refresh URL", () => {
+  // The plugin used to build `<center>/algo/api/v3/user/refresh_token`, which the
+  // live gateway answers 403 "Request discarded" (measured 2026-08-16) and which
+  // appears nowhere in the 1.1.23 bundle. Refresh now goes to the openapi host's
+  // `/api/v1/deviceToken/refresh` (official: `pretty.mjs:115099-115108`). Pin the
+  // host + path so a regression back to the dead endpoint is caught.
+  it("points at the live openapi deviceToken refresh endpoint", () => {
+    expect(`${getQoderOpenApiUrl("global")}/api/v1/deviceToken/refresh`).toBe(
+      "https://openapi.qoder.sh/api/v1/deviceToken/refresh",
+    );
   });
 });
 

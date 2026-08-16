@@ -115,7 +115,14 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
   const nonce = crypto.randomUUID();
   const machineID = getMachineId();
 
-  const verificationURI = `https://qoder.com/device/selectAccounts?challenge=${codeChallenge}&challenge_method=S256&machine_id=${machineID}&nonce=${nonce}`;
+  // Official device-flow client id (`pretty.mjs:114225`, the CLI's `s1Q`) and
+  // parameter order (`pretty.mjs:114161`): challenge, challenge_method, nonce,
+  // machine_id, client_id. Measured 2026-08-16: `qoder.com/device/selectAccounts`
+  // accepts the URL with and without `client_id` identically (both 200 → sign-in,
+  // byte-identical), so the server does not require it today — we send it to match
+  // the official client, not because omitting it breaks (ledger row 53).
+  const clientID = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb";
+  const verificationURI = `https://qoder.com/device/selectAccounts?challenge=${codeChallenge}&challenge_method=S256&nonce=${nonce}&machine_id=${machineID}&client_id=${clientID}`;
 
   getProgress(callbacks)?.("Please complete login in your browser...");
 
@@ -125,8 +132,9 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
   });
 
   const pollURL = `https://openapi.qoder.sh/api/v1/deviceToken/poll?nonce=${encodeURIComponent(nonce)}&verifier=${encodeURIComponent(codeVerifier)}&challenge_method=S256`;
-  const pollInterval = 2000;
-  const maxAttempts = 90; // 3 minutes
+  // Official cadence (`pretty.mjs:114225`): 1000 ms between polls, 300 s overall.
+  const pollInterval = 1000;
+  const maxAttempts = 300; // 300 s
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (getSignal(callbacks)?.aborted) throw new Error("Login cancelled");
@@ -137,13 +145,14 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
         method: "GET",
         headers: {
           Accept: "application/json",
-          "User-Agent": ProviderUserAgent,
         },
         signal: getSignal(callbacks),
       });
 
-      if (response.status === 202 || response.status === 404) {
-        // Pending
+      if (response.status === 404) {
+        // Official treats only 404 as pending (`pretty.mjs:114166-114167`) — a 202
+        // is not a pending signal there. Measured 2026-08-16: the live poll
+        // endpoint returns 404 with `{"errorCode":"NotFound"}` while waiting.
         continue;
       }
 

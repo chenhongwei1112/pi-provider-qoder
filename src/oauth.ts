@@ -3,7 +3,7 @@ import { AuthStorage } from "@earendil-works/pi-coding-agent";
 import {
   getMachineId,
   getQoderMode,
-  getQoderRefreshURL,
+  getQoderOpenApiUrl,
   isQoderCNMode,
   ProviderUserAgent,
   type QoderIdentity,
@@ -223,62 +223,84 @@ async function refreshQoderTokenForMode(credentials: OAuthCredentials, mode: str
   const prevName = prev.name || saved?.name || "";
   const prevEmail = prev.email || saved?.email || "";
 
-  const refreshURL = getQoderRefreshURL(mode);
+  // Official device-token refresh (`pretty.mjs:115099-115108`): POST to the
+  // openapi host's `/api/v1/deviceToken/refresh`, body `{ refresh_token }`
+  // (snake_case), headers Content-Type + Accept + `User-Agent: qoder/<version>`,
+  // and NO `Authorization`. The plugin's previous endpoint
+  // `<center>/algo/api/v3/user/refresh_token` returns 403 "Request discarded"
+  // (measured 2026-08-16) and appears nowhere in the 1.1.23 bundle — it is dead.
+  // The plugin's User-Agent stays `ProviderUserAgent` on purpose (ledger row 48:
+  // the fork self-identifies rather than impersonating the official client).
+  const refreshURL = `${getQoderOpenApiUrl(mode)}/api/v1/deviceToken/refresh`;
+  let response: Response;
   try {
-    const response = await fetch(refreshURL, {
+    response = await fetch(refreshURL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${credentials.access}`,
         Accept: "application/json",
         "User-Agent": ProviderUserAgent,
       },
-      body: JSON.stringify({ refreshToken }),
+      body: JSON.stringify({ refresh_token: refreshToken }),
     });
 
-    if (response.ok) {
-      const data = (await response.json()) as {
-        token: string;
-        refresh_token?: string;
-        expires_at?: string;
-        expires_in?: number;
-      };
-
-      const newAccess = data.token;
-      const newRefresh = data.refresh_token || refreshToken;
-
-      let expireMs = Date.now() + 30 * 24 * 60 * 60 * 1000;
-      if (data.expires_at) {
-        const parsed = Date.parse(data.expires_at);
-        if (!Number.isNaN(parsed)) expireMs = parsed;
-      } else if (data.expires_in) {
-        expireMs = Date.now() + data.expires_in * 1000;
-      }
-
-      const refreshed = {
-        ...credentials,
-        refresh: `${newRefresh}|${userID}|${machineID}`,
-        access: newAccess,
-        expires: expireMs - 5 * 60 * 1000,
-        userID,
-        email: prevEmail,
-        name: prevName,
-        machineID,
-      };
-
-      // omp strips userID/name/machineID from the credential it persists, so the
-      // identity is written alongside it here too.
-      saveQoderIdentity(mode, refreshed);
-      updateQoderModelsCache(newAccess, userID, prevName, prevEmail, mode).catch(() => {});
-
-      return refreshed;
+    if (!response.ok) {
+      // Official throws on a failed refresh (`pretty.mjs:115105-115107`), it does
+      // NOT silently extend. The plugin used to swallow the failure and add an
+      // hour, which is exactly how the dead endpoint went unnoticed — extending an
+      // already-expired token does not make the next request succeed, it only
+      // hides that refresh is broken. Surface it instead.
+      const text = await response.text().catch(() => "");
+      throw new Error(
+        `Qoder device-token refresh failed: ${response.status} ${response.statusText}. ${text.slice(0, 200)}`,
+      );
     }
-  } catch {}
 
-  // Fallback: Extend validity slightly to buy time, as Qoder tokens are long-lived
-  const refreshedFallback = {
-    ...credentials,
-    expires: Date.now() + 60 * 60 * 1000, // extend for 1 hour
-  };
-  return refreshedFallback;
+    // Official reads `device_token` / `refresh_token` / `expires_at`
+    // (`pretty.mjs:115107`). Accept `token` and `expires_in` too so a gateway that
+    // answers in the older shape still works.
+    const data = (await response.json()) as {
+      device_token?: string;
+      token?: string;
+      refresh_token?: string;
+      expires_at?: string;
+      expires_in?: number;
+    };
+
+    const newAccess = data.device_token || data.token || "";
+    if (!newAccess) {
+      throw new Error("Qoder device-token refresh returned no access token");
+    }
+    const newRefresh = data.refresh_token || refreshToken;
+
+    let expireMs = Date.now() + 30 * 24 * 60 * 60 * 1000;
+    if (data.expires_at) {
+      const parsed = Date.parse(data.expires_at);
+      if (!Number.isNaN(parsed)) expireMs = parsed;
+    } else if (data.expires_in) {
+      expireMs = Date.now() + data.expires_in * 1000;
+    }
+
+    const refreshed = {
+      ...credentials,
+      refresh: `${newRefresh}|${userID}|${machineID}`,
+      access: newAccess,
+      expires: expireMs - 5 * 60 * 1000,
+      userID,
+      email: prevEmail,
+      name: prevName,
+      machineID,
+    };
+
+    // omp strips userID/name/machineID from the credential it persists, so the
+    // identity is written alongside it here too.
+    saveQoderIdentity(mode, refreshed);
+    updateQoderModelsCache(newAccess, userID, prevName, prevEmail, mode).catch(() => {});
+
+    return refreshed;
+  } catch (e) {
+    // Real refresh failures propagate (see the `!response.ok` branch). A non-Error
+    // throw is not a refresh outcome, so re-throw it too rather than swallow.
+    throw e;
+  }
 }

@@ -135,10 +135,6 @@ export function getQoderUsageURL(mode?: string): string {
   return `${getQoderOpenApiUrl(mode)}/api/v2/quota/usage`;
 }
 
-export function getQoderRefreshURL(mode?: string): string {
-  return `${getQoderCenterUrl(mode)}/algo/api/v3/user/refresh_token`;
-}
-
 export function getQoderCNDirectModel(modelID?: string): string {
   return (
     {
