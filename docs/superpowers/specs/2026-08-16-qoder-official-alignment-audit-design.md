@@ -127,6 +127,7 @@ glue 的切法已验证：取重排版 bundle 的第 1–40 行（运行时 help
 - chat URL 含 `?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`，插件 `cosy.ts:104` 完全一致。
 - `Cosy-Data-Policy: disagree`，一致。
 - infer 请求头 `X-Model-Key` / `X-Model-Source` / `Accept: text/event-stream` / `Cache-Control: no-cache` / `Content-Type: application/json`，插件 `transport.ts:201-209` 一致。
+- 请求体混淆编码：`qoder-encoding.ts` 与 WASM 输出**逐字节相同**，已在 4 组输入（64 B JSON、1008 B、`{}`、含中文与 emoji）上验证。
 
 ### 差异
 
@@ -142,7 +143,6 @@ glue 的切法已验证：取重排版 bundle 的第 1–40 行（运行时 help
 | 8 | `Accept-Encoding` | 仅 auth GET 带 `identity`，infer 不带 | infer 也带 `identity`（`transport.ts:205`） | 低 |
 | 9 | `info` / `Cosy-Key` 来源 | 登录时服务端下发 `encrypt_user_info` 与 `key`，之后原样回放 | 本地 AES-CBC + RSA 现算（`cosy.ts:280-281`） | 中 |
 | 10 | 端点解析 | `/api/v3\|v4/service/region/endpoints` 动态发现 + `/algo/api/v1/ping` 健康检查 | 硬编码 `api3.qoder.sh` / `gateway.qoder.com.cn` | 中 |
-| 11 | body 编码 | 在 WASM 内完成（147 B JSON → 196 B） | TS 重实现 `qoder-encoding.ts`，等价性未验证 | 中 |
 
 第 9 项是架构级差异，很可能落入「不能对齐」——插件没有官方登录响应里的那两个字段。审计需要确认服务端是否接受本地现算的值，以及这是否解释了任何已观测到的行为差异。
 
