@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import type { Api, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { getQoderChatURL, getQoderCNDirectModel, isQoderCNMode, type QoderIdentity } from "./cosy.js";
-import { getCachedModelConfig } from "./models.js";
+import { getCachedModelConfig, thinkingFor } from "./models.js";
 import { applyPromptCacheBreakpoint } from "./prompt-cache.js";
 import { qoderEncodeBodyToBuffer } from "./qoder-encoding.js";
 import { transformMessagesForQoder, transformTools } from "./transform.js";
@@ -198,18 +198,33 @@ export function buildChatRequest(args: {
 
   const maxOutputTokens = clampMaxTokens(modelConfig.max_output_tokens);
   // Map omp's thinking option onto the official effort vocabulary
-  // (`pretty.mjs:85158-85166`). The declared `ThinkingLevel` is narrower than
-  // what actually arrives -- `--thinking off` reaches here as the
-  // `ModelThinkingLevel` token "off", and "max" is outside the declared union
-  // too -- so the option is read as `unknown` and the tokens are matched as
-  // data. An unrecognized value leaves both signals unset, which is the
-  // official default path: no reasoning keys in `parameters` at all.
+  // (`pretty.mjs:85158-85166`). Two signals arrive: the current harness sends
+  // `--thinking off` as `disableReasoning: true` with `reasoning` unset, while
+  // the declared `SimpleStreamOptions` still admits the narrower path where
+  // `reasoning` itself carries "off"/"none"/false. Both are honored. The
+  // declared `ThinkingLevel` is also narrower than what actually arrives --
+  // "max" is outside the declared union too -- so the option is read as
+  // `unknown` and the tokens are matched as data.
+  //
+  // The level is then checked against the model's own effort rungs from the
+  // catalog's `thinking_config.enabled.efforts`. omp's fork only offers the
+  // catalog's tokens, so menu picks ride through unchanged; the check screens
+  // raw tokens the fork would never pick: `minimal` snaps onto the lowest rung,
+  // `xhigh` onto the highest, and a level with no rung at all falls back to
+  // the official default path -- no reasoning keys in `parameters` whatsoever.
+  // No catalog info at all (cache miss) keeps the pre-catalog pass-through.
+  const rungs = thinkingFor(modelConfig)?.efforts;
   const reasoningVal: unknown = options?.reasoning;
-  const thinkingDisabled = reasoningVal === false || reasoningVal === "off" || reasoningVal === "none";
+  const disableVal: unknown = (options as { disableReasoning?: unknown } | undefined)?.disableReasoning;
+  const thinkingDisabled =
+    disableVal === true || reasoningVal === false || reasoningVal === "off" || reasoningVal === "none";
   let thinkingEffort: string | undefined;
   if (!thinkingDisabled && typeof reasoningVal === "string") {
-    if (reasoningVal === "minimal") thinkingEffort = "low";
-    else if (REASONING_EFFORTS.includes(reasoningVal)) thinkingEffort = reasoningVal;
+    if (reasoningVal === "minimal") thinkingEffort = rungs?.[0] ?? "low";
+    else if (REASONING_EFFORTS.includes(reasoningVal)) {
+      if (!rungs || rungs.includes(reasoningVal)) thinkingEffort = reasoningVal;
+      else if (reasoningVal === "xhigh") thinkingEffort = rungs[rungs.length - 1];
+    }
   }
   const isReasoning = effectiveIsReasoning(!!modelConfig.is_reasoning, thinkingDisabled, thinkingEffort);
 

@@ -13,7 +13,7 @@ import { agentPath } from "./paths.js";
 import { parseQoderJsonBody } from "./qoder-encoding.js";
 
 /** Shape of a single entry returned by the Qoder /model/list endpoint. */
-interface QoderModelEntry {
+export interface QoderModelEntry {
   key?: string;
   enable?: boolean | 0;
   display_name?: string;
@@ -25,6 +25,52 @@ interface QoderModelEntry {
   thinking_config?: { enabled?: { efforts?: unknown } };
   source?: string;
   [key: string]: unknown;
+}
+
+/**
+ * The official effort vocabulary, ordered weakest to strongest. This is the
+ * vocabulary the catalog's `thinking_config.enabled.efforts` keys come from,
+ * and the order omp's pi fork ranks thinking levels by. `minimal` never
+ * appears as a catalog effort: it is a pi-only level that maps onto the
+ * model's lowest rung.
+ */
+const EFFORTS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
+
+/** The catalog entry's thinking capability, as omp's pi fork consumes it. */
+export interface QoderThinking {
+  /** The catalog's efforts, in ladder order. */
+  efforts: string[];
+  /** The catalog's `is_default` effort, when it declares one. */
+  defaultLevel?: string;
+}
+
+/**
+ * Project a catalog entry's `thinking_config.enabled.efforts` onto the thinking
+ * metadata omp's pi fork consumes: models declare `thinking: { mode: "effort",
+ * efforts, defaultLevel }`, where the thinking menu IS the efforts list -- a
+ * model without the block exposes no levels at all -- and `defaultLevel` seeds
+ * the initial level. The fork's ladder is six-rung (minimal..max), so the
+ * catalog's own tokens ride it unchanged.
+ *
+ * Undefined when the catalog declares no efforts (thinking is a plain on/off
+ * toggle for that model): the model gets no thinking block, and the provider's
+ * request builder leaves the reasoning keys off.
+ */
+export function thinkingFor(entry: QoderModelEntry | null | undefined): QoderThinking | undefined {
+  const efforts = entry?.thinking_config?.enabled?.efforts;
+  if (!efforts || typeof efforts !== "object" || Array.isArray(efforts)) return undefined;
+  const rungs = Object.keys(efforts)
+    .filter((e) => EFFORTS.includes(e))
+    .sort((a, b) => EFFORTS.indexOf(a) - EFFORTS.indexOf(b));
+  if (rungs.length === 0) return undefined;
+  let defaultLevel: string | undefined;
+  for (const [name, cfg] of Object.entries(efforts as Record<string, unknown>)) {
+    if (rungs.includes(name) && (cfg as { is_default?: boolean } | null)?.is_default === true) {
+      defaultLevel = name;
+      break;
+    }
+  }
+  return { efforts: rungs, ...(defaultLevel ? { defaultLevel } : {}) };
 }
 
 function getQoderCachePath(mode?: string): string {

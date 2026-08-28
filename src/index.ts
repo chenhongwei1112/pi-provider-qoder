@@ -1,7 +1,7 @@
 import type { Api, Model, OAuthCredentials } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ProviderConfig } from "@earendil-works/pi-coding-agent";
 import { getQoderBaseUrl, getQoderMode, isQoderCNMode, toQoderCNFriendlyModel } from "./cosy.js";
-import { getCachedModels, isCacheStale, updateQoderModelsCache } from "./models.js";
+import { getCachedModelConfig, getCachedModels, isCacheStale, thinkingFor, updateQoderModelsCache } from "./models.js";
 import { staticCnModels, staticModels } from "./models-static.js";
 import {
   autoLoginQoderFromEnvironment,
@@ -29,12 +29,27 @@ function modelsForProvider(mode: string, providerID: string): Model<Api>[] {
 
   return modelsToUse.map((m) => {
     const model = isQoderCNMode(mode) ? toQoderCNFriendlyModel(m) : m;
+    // Declare the catalog's real effort rungs the way omp's pi fork consumes
+    // them: its thinking menu IS `thinking.efforts` -- a model without the
+    // block exposes no levels at all -- and `thinking.defaultLevel` seeds the
+    // initial level. The cast keeps the block, which the published `Model`
+    // type does not know about, out of its way.
+    const thinking = thinkingFor(getCachedModelConfig(model.id, mode));
     return {
       ...model,
       provider: providerID,
       baseUrl: getQoderBaseUrl(mode),
-    };
-  }) as unknown as Model<Api>[];
+      ...(thinking
+        ? {
+            thinking: {
+              mode: "effort",
+              efforts: thinking.efforts,
+              ...(thinking.defaultLevel ? { defaultLevel: thinking.defaultLevel } : {}),
+            },
+          }
+        : {}),
+    } as unknown as Model<Api>;
+  });
 }
 
 function createQoderOAuth(mode: string): OAuthConfigWithUsage {

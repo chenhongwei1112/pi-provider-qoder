@@ -1,5 +1,6 @@
 import type { Api, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getCachedModelConfig, thinkingFor } from "../models.js";
 
 // This file exists separately from request.test.ts on purpose. Both suites below
 // need a model config that is known exactly, and the only door for one is
@@ -7,11 +8,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // and hoisted, so mocking models.js here keeps the differential suite in
 // request.test.ts reading everything off the real return value and the decoded
 // body, with no mock in sight.
-vi.mock("../models.js", () => ({
+vi.mock("../models.js", async (importOriginal) => ({
+  ...(await importOriginal()),
   getCachedModelConfig: vi.fn(),
 }));
 
-import { getCachedModelConfig } from "../models.js";
 import {
   buildChatParameters,
   buildChatRequest,
@@ -508,6 +509,161 @@ describe("buildChatRequest carries the thinking preference in parameters", () =>
       expect(wire).not.toContain("thinking_config");
       expect(wire).not.toContain("thinking_effort");
     }
+  });
+
+  it("turns thinking off through the harness's disableReasoning flag", () => {
+    // The current harness does not put "off" into `reasoning`: it sends
+    // `reasoning: undefined` plus `disableReasoning: true` (a newer
+    // SimpleStreamOptions field than the declared provider type). Ignoring the
+    // flag left thinking on at the server's default effort.
+    mockedGetCachedModelConfig.mockReturnValue({
+      key: "dfmodel",
+      is_reasoning: true,
+      max_output_tokens: 32768,
+      source: "system",
+      thinking_config: { enabled: { efforts: { high: {}, max: { is_default: true }, low: {} } } },
+    });
+    const body = decodeQoderBody(
+      buildChatRequest({
+        model,
+        context,
+        options: { disableReasoning: true } as unknown as SimpleStreamOptions,
+        providerMode: "qoder",
+        identity,
+      }).encodedBytes,
+    );
+    const parameters = objectField(body, "parameters") as Record<string, unknown>;
+    expect(parameters.reasoning_effort).toBe("none");
+    expect(parameters.enable_thinking).toBe(false);
+  });
+});
+
+// --- the catalog's thinking capability, projected for omp's pi fork --------
+// A model's `thinking_config.enabled.efforts` is authoritative. It feeds the
+// fork's `thinking: { mode: "effort", efforts, defaultLevel }` block, whose
+// menu IS the efforts list -- a model without the block exposes no levels at
+// all. The provider's request builder screens raw levels against the same
+// rungs: minimal snaps onto the lowest rung, xhigh onto the highest, and a
+// level with no rung leaves the reasoning keys off the wire.
+describe("thinkingFor", () => {
+  // dfmodel's actual catalog shape, keys in the arbitrary JSON order the cache
+  // file happens to store them in.
+  const dfmodel = {
+    key: "dfmodel",
+    thinking_config: { enabled: { efforts: { high: {}, max: { is_default: true }, low: {} } } },
+  };
+
+  it("projects the catalog entry for omp's fork", () => {
+    expect(thinkingFor(dfmodel)).toEqual({
+      efforts: ["low", "high", "max"],
+      defaultLevel: "max",
+    });
+  });
+
+  it("omits defaultLevel when no effort carries is_default", () => {
+    expect(thinkingFor({ key: "x", thinking_config: { enabled: { efforts: { low: {}, high: {} } } } })).toEqual({
+      efforts: ["low", "high"],
+    });
+  });
+
+  it("sorts a partial ladder into ladder order", () => {
+    // dmodel offers only high and max.
+    expect(thinkingFor({ key: "dmodel", thinking_config: { enabled: { efforts: { max: {}, high: {} } } } })).toEqual({
+      efforts: ["high", "max"],
+    });
+  });
+
+  it("keeps xhigh and max as distinct rungs on full-ladder models", () => {
+    // Full-ladder models offer BOTH xhigh and max; they must stay separate
+    // menu entries, or picking xhigh would silently request max.
+    expect(
+      thinkingFor({
+        key: "ultimate",
+        thinking_config: {
+          enabled: { efforts: { low: {}, medium: {}, high: {}, xhigh: {}, max: { is_default: true } } },
+        },
+      }),
+    ).toEqual({
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultLevel: "max",
+    });
+  });
+
+  it("returns undefined when the catalog declares no efforts", () => {
+    // On/off-only models (qmodel, qmodel_latest) and the cache-miss fallback
+    // have no effort list to expose.
+    expect(thinkingFor({ key: "qmodel", thinking_config: { enabled: {} } })).toBeUndefined();
+    expect(thinkingFor({ key: "qmodel", thinking_config: { enabled: { efforts: {} } } })).toBeUndefined();
+    expect(thinkingFor(null)).toBeUndefined();
+  });
+
+  it("ignores effort keys outside the official vocabulary", () => {
+    // The catalog is remote data; an unexpected effort key must not become a
+    // rung -- not in the efforts list, not as defaultLevel.
+    expect(
+      thinkingFor({ key: "x", thinking_config: { enabled: { efforts: { high: {}, ultra: { is_default: true } } } } }),
+    ).toEqual({
+      efforts: ["high"],
+    });
+  });
+});
+
+describe("buildChatRequest maps the thinking level through the catalog's rungs", () => {
+  beforeEach(() => {
+    mockedGetCachedModelConfig.mockReset();
+  });
+
+  function parametersFor(reasoning: string): Record<string, unknown> {
+    mockedGetCachedModelConfig.mockReturnValue({
+      key: "dfmodel",
+      is_reasoning: true,
+      max_output_tokens: 32768,
+      source: "system",
+      thinking_config: { enabled: { efforts: { high: {}, max: { is_default: true }, low: {} } } },
+    });
+    return objectField(
+      decodeQoderBody(
+        buildChatRequest({
+          model,
+          context,
+          options: { reasoning } as unknown as SimpleStreamOptions,
+          providerMode: "qoder",
+          identity,
+        }).encodedBytes,
+      ),
+      "parameters",
+    ) as Record<string, unknown>;
+  }
+
+  it("sends the model's own rung for each supported level", () => {
+    expect(parametersFor("low").reasoning_effort).toBe("low");
+    expect(parametersFor("high").reasoning_effort).toBe("high");
+  });
+
+  it("rides xhigh on the model's highest rung", () => {
+    expect(parametersFor("xhigh").reasoning_effort).toBe("max");
+  });
+
+  it("folds minimal to the model's lowest rung", () => {
+    expect(parametersFor("minimal").reasoning_effort).toBe("low");
+  });
+
+  it("drops an unsupported level to the official default path", () => {
+    // medium has no rung on dfmodel. The harness's clampThinkingLevel snaps it
+    // before it reaches the provider; a raw medium arriving anyway must not go
+    // on the wire as an effort the model has no slot for.
+    expect(Object.keys(parametersFor("medium"))).toEqual(["max_tokens"]);
+  });
+
+  it("passes a raw max token through untouched", () => {
+    // dfmodel has a max rung, so the token rides through as its own rung.
+    expect(parametersFor("max").reasoning_effort).toBe("max");
+  });
+
+  it("keeps the off path independent of the rungs", () => {
+    const parameters = parametersFor("off");
+    expect(parameters.reasoning_effort).toBe("none");
+    expect(parameters.enable_thinking).toBe(false);
   });
 });
 
